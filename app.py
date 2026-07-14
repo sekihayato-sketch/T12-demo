@@ -5,7 +5,7 @@ import plotly.express as px
 import time
 import hashlib
 
-st.set_page_config(page_title="T12 100.66Mb Streaming Simulator", layout="wide")
+st.set_page_config(page_title="T12 QKD 100.66Mb Simulator", layout="wide")
 
 # =============================
 # T12 paper-like constants
@@ -22,24 +22,34 @@ P_Z_T12 = 0.96677
 P_ST = 1 / 128
 EPS_AUTH = 1e-10
 EC_FAIL_PROB_DEFAULT = 0.0073
-EC_BLOCK_SIZE = 1_000_000
-EC_SAMPLE_BITS_PER_BLOCK = 8_192
 PAPER_PA_RATIO = 0.292
-USE_PAPER_PA_CAP = True
 
-st.title("BB84 / T12 100.66Mb 実装値寄せシミュレータ")
-st.caption("基底表・詳細表・アニメーションを削除し、100.66Mb級データセットをチャンク処理で直接シミュレーションします。")
+st.title("インターン向け T12 QKDシミュレータ")
+st.caption("100.66Mb級のT12論文値を使い、BB84との違い・デコイ解析・EC/PA後処理が鍵生成率に与える影響を確認します。")
 
 st.markdown("""
-この版は、**100.66Mb PA datasetに近づけることを優先**した軽量版です。
-巨大なビット列・詳細表・アニメーションは保持せず、チャンクごとに集計値だけを加算します。
+このアプリは、QKDの後処理をインターン生にも説明しやすくするための **教育用シミュレータ** です。
+巨大なビット列や基底表は保持せず、チャンクごとに集計値だけを加算することで、**100.66Mパルス級**の計算を扱います。
 
-- T12論文値：`pZ=96.677%`, `pX=3.323%`, `u/v/w=0.4/0.1/0.0007`, `p_u/p_v/p_w=96.973%/1.661%/1.466%`
-- 実際に **100.66Mパルス級** を直接シミュレーション可能
-- 表示は `K/M/G/T` 単位に整形
-- 詳細表・アニメーションは削除
+### 何を見るアプリか
+- **BB84参照**：Z/X基底を50:50で選ぶ基本モデルです。
+- **T12論文値**：Z基底を高確率で選び、鍵生成に使えるZ/Z一致を増やすモデルです。
+- **デコイ解析**：signal/decoy/vacuumの検出率から、単一光子成分の寄与を推定します。
+- **EC/PA後処理**：QBER推定公開、ECリーク、位相誤り、有限サイズ補正、認証コスト、復号失敗率が最終鍵長に与える影響を見ます。
+
+### 主なT12パラメータ
+```text
+pZ = 96.677%, pX = 3.323%
+u/v/w = 0.4 / 0.1 / 0.0007 photons/pulse
+p_u/p_v/p_w = 96.973% / 1.661% / 1.466%
+p_st = 1/128
+PA dataset = 100.66 Mb
+```
 """)
 
+# =============================
+# Sidebar
+# =============================
 with st.sidebar:
     st.header("シミュレーション条件")
     dataset_size = st.select_slider(
@@ -57,40 +67,15 @@ with st.sidebar:
 
     st.markdown("---")
     st.subheader("物理・検出条件")
-
-    spd_efficiency = st.slider(
-        "SPD効率 [%]",
-        1.0,
-        100.0,
-        31.0,
-        step=0.1
-    ) / 100.0
-
-    receiver_optical_loss_db = st.slider(
-        "受信光学損失 [dB]",
-        0.0,
-        10.0,
-        1.6,
-        step=0.1
-    )
-
-    channel_loss_db = st.slider(
-        "チャネル損失 [dB]",
-        0.0,
-        30.0,
-        2.0,
-        step=0.1
-    )
-
-    total_detection_efficiency = spd_efficiency * 10 ** (
-        -(receiver_optical_loss_db + channel_loss_db) / 10
-    )
-
+    spd_efficiency = st.slider("SPD効率 [%]", 1.0, 100.0, 31.0, step=0.1) / 100.0
+    receiver_optical_loss_db = st.slider("受信光学損失 [dB]", 0.0, 10.0, 1.6, step=0.1)
+    channel_loss_db = st.slider("チャネル損失 [dB]", 0.0, 30.0, 2.0, step=0.1)
+    total_detection_efficiency = spd_efficiency * 10 ** (-(receiver_optical_loss_db + channel_loss_db) / 10)
     st.caption(
         f"総合検出効率 η = {total_detection_efficiency * 100:.2f}% "
-        f"(SPD効率 × 受信光学損失 × チャネル損失)"
+        f"= SPD効率 × 10^(-損失/10)"
     )
-    
+
     dark_count_rate = st.slider("暗計数率 Y0 [%/pulse]", 0.0, 1.0, 0.045, step=0.001) / 100.0
     optical_error_rate = st.slider("光学系・通信路由来の誤り率 Eopt [%]", 0.0, 10.0, 3.0, step=0.1) / 100.0
     afterpulse_error_rate = st.slider("アフターパルス由来の追加誤り率 [%]", 0.0, 10.0, 0.0, step=0.1) / 100.0
@@ -104,11 +89,16 @@ with st.sidebar:
     st.subheader("後処理")
     qber_threshold = st.slider("鍵破棄しきい値 QBER [%]", 0.0, 20.0, 11.0, step=0.5)
     finite_sigma = st.slider("有限サイズ補正 sigma", 0.0, 10.0, 1.0, step=0.5)
+    ec_block_size = st.select_slider("ECブロックサイズ [bit]", options=[256_000, 512_000, 1_000_000, 2_000_000, 5_000_000], value=1_000_000)
+    qber_sample_bits_per_block = st.select_slider("QBER推定公開ビット/ECブロック", options=[0, 4096, 8192, 16384, 32768], value=8192)
     ec_fail_prob = st.slider("EC復号失敗率 [%]", 0.0, 5.0, EC_FAIL_PROB_DEFAULT * 100, step=0.01) / 100.0
     ec_model = st.radio("ECモデル", ["LDPC風・QBER依存", "固定fEC"], index=0)
     fixed_f_ec = st.slider("固定 fEC", 1.00, 2.00, 1.34, step=0.01)
+    use_paper_pa_cap = st.checkbox("T12に論文PA圧縮比0.292の上限を適用", value=True)
 
-
+# =============================
+# Utility
+# =============================
 def fmt_si(value, suffix="", decimals=2):
     try:
         x = float(value)
@@ -118,7 +108,7 @@ def fmt_si(value, suffix="", decimals=2):
     x = abs(x)
     for scale, unit in [(1e12, "T"), (1e9, "G"), (1e6, "M"), (1e3, "K")]:
         if x >= scale:
-            return f"{sign}{x/scale:.{decimals}f}{unit}{suffix}"
+            return f"{sign}{x / scale:.{decimals}f}{unit}{suffix}"
     if x.is_integer():
         return f"{sign}{int(x)}{suffix}"
     return f"{sign}{x:.{decimals}f}{suffix}"
@@ -189,18 +179,18 @@ def init_counts(protocol):
         "photon_multi": 0,
     }
 
-
+# =============================
+# Simulation
+# =============================
 def simulate_chunk(rng, size, protocol, counts):
     pz = 0.5 if protocol == "BB84参照" else P_Z_T12
 
-    # Stabilization and intensity choice
     stabilization = rng.random(size) < P_ST
     probs = np.array([P_U, P_V, P_W], dtype=float)
     probs = probs / probs.sum()
     intensity = rng.choice(np.array([0, 1, 2], dtype=np.int8), size=size, p=probs)
     mu = np.where(intensity == 0, MU_U, np.where(intensity == 1, MU_V, MU_W))
 
-    alice_bits = rng.integers(0, 2, size=size, dtype=np.int8)
     alice_z = rng.random(size) < pz
     bob_z = rng.random(size) < pz
 
@@ -210,7 +200,6 @@ def simulate_chunk(rng, size, protocol, counts):
     dark_detected = rng.random(size) < dark_count_rate
     detected = (photon_detected | dark_detected) & (~stabilization)
 
-    # Basis match
     basis_match = detected & (alice_z == bob_z)
     z_match = basis_match & alice_z
     x_match = basis_match & (~alice_z)
@@ -223,7 +212,6 @@ def simulate_chunk(rng, size, protocol, counts):
         key_mask = signal & basis_match
         check_mask = x_match
 
-    # Error model
     base_error = min(1.0, optical_error_rate + afterpulse_error_rate)
     error_prob = np.full(size, base_error, dtype=np.float32)
     dark_only = dark_detected & (~photon_detected) & detected
@@ -234,15 +222,11 @@ def simulate_chunk(rng, size, protocol, counts):
         eve_z = rng.random(size) < 0.5
         eve_wrong = eve & (eve_z != alice_z)
         error_prob[eve_wrong] = 0.5
-    else:
-        eve = np.zeros(size, dtype=bool)
 
     errors = rng.random(size) < error_prob
-
     key_errors = key_mask & errors
     x_errors = check_mask & errors
 
-    # counts
     counts["N"] += size
     counts["stabilization"] += int(stabilization.sum())
     counts["u"] += int((intensity == 0).sum())
@@ -299,98 +283,48 @@ def decoy_estimate(c):
     else:
         e1_U = 0.5
 
-    return {"Q_u": Q_u, "Q_v": Q_v, "Q_w": Q_w, "Y0_est": Y0, "Y1_L": Y1_L, "Q1_L": Q1_L, "e1_U": e1_U}
+    return {
+        "Q_u": Q_u,
+        "Q_v": Q_v,
+        "Q_w": Q_w,
+        "Y0_est": Y0,
+        "Y1_L": Y1_L,
+        "Q1_L": Q1_L,
+        "e1_U": e1_U,
+    }
 
 
-def finalize_counts(c):
+def finalize_counts(c, finite_sigma_value=None, ec_block_size_value=None, qber_sample_bits_value=None, pa_cap_value=None):
+    finite_sigma_value = finite_sigma if finite_sigma_value is None else finite_sigma_value
+    ec_block_size_value = ec_block_size if ec_block_size_value is None else ec_block_size_value
+    qber_sample_bits_value = qber_sample_bits_per_block if qber_sample_bits_value is None else qber_sample_bits_value
+    pa_cap_value = use_paper_pa_cap if pa_cap_value is None else pa_cap_value
+
     N = max(c["N"], 1)
     key_len = c["key_len"]
     qber = c["key_errors"] / max(key_len, 1)
     x_qber = c["x_errors"] / max(c["x_len"], 1)
-    finite_margin = 0.2 * finite_sigma / np.sqrt(max(c["x_len"], 1))
+    finite_margin = 0.2 * finite_sigma_value / np.sqrt(max(c["x_len"], 1))
     phase_error = min(0.5, x_qber + finite_margin)
     f_ec = f_ec_ldpc_like(qber) if ec_model == "LDPC風・QBER依存" else fixed_f_ec
-    
-    # =============================
-    # EC block processing model
-    # =============================
-    
-    # ECブロック数
-    num_ec_blocks = int(np.ceil(key_len / EC_BLOCK_SIZE)) if key_len > 0 else 0
-    
-    # 各ECブロックでQBER推定用に公開・破棄するビット数
-    qber_sample_bits = min(
-        key_len,
-        num_ec_blocks * EC_SAMPLE_BITS_PER_BLOCK
-    )
-    
-    # QBER推定に使ったビットは公開されるため、最終鍵には使わない
+
+    num_ec_blocks = int(np.ceil(key_len / ec_block_size_value)) if key_len > 0 else 0
+    qber_sample_bits = min(key_len, num_ec_blocks * qber_sample_bits_value)
     ec_input_len = max(0, key_len - qber_sample_bits)
-    
-    # =============================
-    # EC leakage
-    # =============================
-    
-    # LDPCそのものを復号するのではなく、
-    # LDPC風に fEC * H2(QBER) * EC対象長 で公開情報量を見積もる
+
     ec_leakage = int(round(f_ec * h2(qber) * ec_input_len)) if ec_input_len > 0 else 0
-    
-    # =============================
-    # Phase error / Privacy amplification
-    # =============================
-    
     privacy_term = int(round(ec_input_len * h2(phase_error))) if ec_input_len > 0 else 0
-    
-    # =============================
-    # Finite-size penalty
-    # =============================
-    
-    finite_penalty = int(
-        np.ceil(
-            finite_sigma
-            * np.sqrt(max(ec_input_len, 1))
-            * np.log2(max(ec_input_len, 2))
-        )
-    ) if ec_input_len > 0 else 0
-    
-    # =============================
-    # Authentication cost
-    # =============================
-    
+    finite_penalty = int(np.ceil(finite_sigma_value * np.sqrt(max(ec_input_len, 1)) * np.log2(max(ec_input_len, 2)))) if ec_input_len > 0 else 0
     auth_cost = int(np.ceil(2 * np.log2(1 / EPS_AUTH)))
-    
-    # =============================
-    # Final key length
-    # =============================
-    
-    raw_secure = (
-        ec_input_len
-        - ec_leakage
-        - privacy_term
-        - finite_penalty
-        - auth_cost
-    )
-    
+
+    raw_secure = ec_input_len - ec_leakage - privacy_term - finite_penalty - auth_cost
     final_key_len = int(max(0, raw_secure) * (1 - ec_fail_prob))
-    
-    # T12論文値再現モード：
-    # 論文ではPA圧縮比が約0.292なので、
-    # T12については楽観的になりすぎないよう上限をかける。
-    if c["Protocol"] == "T12論文値" and USE_PAPER_PA_CAP:
+
+    if c["Protocol"] == "T12論文値" and pa_cap_value:
         paper_like_upper_bound = int(ec_input_len * PAPER_PA_RATIO)
         final_key_len = min(final_key_len, paper_like_upper_bound)
 
-    # T12論文では、100.66Mbの誤り訂正済み鍵から
-    # 平均して約29%程度の安全鍵を抽出している。
-    # そのため、T12については最終鍵長が楽観的になりすぎないように、
-    # 論文のPA圧縮比 0.292 を上限としてかける。
-    if c["Protocol"] == "T12論文値":
-        paper_pa_ratio = 0.292
-        paper_like_upper_bound = int(key_len * paper_pa_ratio)
-        final_key_len = min(final_key_len, paper_like_upper_bound)
-
     can_generate = key_len > 0 and qber * 100 <= qber_threshold and final_key_len > 0
-
     if not can_generate:
         final_key_len = 0
 
@@ -423,6 +357,7 @@ def finalize_counts(c):
         "finite penalty[bit]": finite_penalty,
         "auth cost[bit]": auth_cost,
         "EC fail prob[%]": ec_fail_prob * 100,
+        "PA上限適用": pa_cap_value and c["Protocol"] == "T12論文値",
         "最終鍵長": final_key_len,
         "最終鍵効率[%]": final_key_len / N * 100,
         "推定sifted rate[Mb/s]": PULSE_RATE_HZ * key_len / N / 1e6,
@@ -436,6 +371,7 @@ def finalize_counts(c):
         "e1_U[%]": decoy["e1_U"] * 100,
         "final_key": hash_preview(final_key_len),
         "can_generate_key": can_generate,
+        "_counts": c,
     }
 
 
@@ -455,7 +391,9 @@ def run_stream(protocol, progress_bar=None, status_box=None):
             status_box.caption(f"{protocol}: {fmt_si(done)} / {fmt_si(dataset_size)} パルス処理済み")
     return finalize_counts(counts)
 
-
+# =============================
+# Display helpers
+# =============================
 def metric_cards(s):
     items = [
         ("送信", fmt_si(s["送信パルス数"])),
@@ -465,24 +403,22 @@ def metric_cards(s):
         ("最終鍵", fmt_si(s["最終鍵長"], "bit")),
         ("推定SKR", fmt_si(s["推定secure rate[Mb/s]"] * 1e6, "b/s")),
     ]
-
     row1 = st.columns(3)
     row2 = st.columns(3)
-
     for col, (label, value) in zip(row1, items[:3]):
         with col:
             st.markdown(f"**{label}**")
             st.markdown(f"### `{value}`")
-
     for col, (label, value) in zip(row2, items[3:]):
         with col:
             st.markdown(f"**{label}**")
             st.markdown(f"### `{value}`")
 
+
 def format_numeric_tables(df):
     out = df.copy()
     for col in out.columns:
-        if col in ["プロトコル"]:
+        if col in ["プロトコル", "PA上限適用"]:
             continue
         if pd.api.types.is_numeric_dtype(out[col]):
             if "[%]" in col or "QBER" in col or "error" in col or "効率" in col or "prob" in col:
@@ -507,27 +443,45 @@ def plot_horizontal_grouped(df, value_cols, title, x_title):
         title=title,
     )
     fig.update_traces(texttemplate="%{x:.2f}", textposition="outside", cliponaxis=False)
-    fig.update_layout(
-        xaxis_title=x_title,
-        yaxis_title="",
-        legend_title="",
-        height=360,
-        margin=dict(l=40, r=80, t=60, b=40),
-        font=dict(size=14),
-    )
+    fig.update_layout(xaxis_title=x_title, yaxis_title="", legend_title="", height=360, margin=dict(l=40, r=100, t=60, b=40), font=dict(size=14))
     return fig
 
 
-if st.button("100.66Mb級シミュレーション実行", type="primary"):
-    st.warning("100.66Mパルスでは数十秒〜数分かかる場合があります。Streamlit Cloudの負荷が高い場合は、まず16.78Mまたは67.11Mで確認してください。")
-    start = time.time()
+def build_post_df(summaries):
+    return pd.DataFrame([
+        {
+            "プロトコル": s["Protocol"],
+            "鍵候補長": s["鍵候補長"],
+            "ECブロック数": s["ECブロック数"],
+            "QBER推定公開ビット": s["QBER推定公開ビット"],
+            "EC入力長": s["EC入力長"],
+            "QBER[%]": s["QBER[%]"],
+            "phase error[%]": s["phase error[%]"],
+            "fEC": s["fEC"],
+            "EC leakage[bit]": s["EC leakage[bit]"],
+            "privacy term[bit]": s["privacy term[bit]"],
+            "finite penalty[bit]": s["finite penalty[bit]"],
+            "auth cost[bit]": s["auth cost[bit]"],
+            "EC fail prob[%]": s["EC fail prob[%]"],
+            "PA上限適用": s["PA上限適用"],
+            "最終鍵長": s["最終鍵長"],
+            "推定secure rate[Mb/s]": s["推定secure rate[Mb/s]"],
+        }
+        for s in summaries
+    ])
 
+
+if st.button("100.66Mb級シミュレーション実行", type="primary"):
+    st.warning("100.66Mパルスでは数十秒〜数分かかる場合があります。まずT12単体で確認すると速いです。")
+    start = time.time()
     summaries = []
+
     if protocol_mode in ["比較表示", "BB84参照のみ"]:
         st.subheader("BB84参照を計算中")
         pb = st.progress(0)
         box = st.empty()
         summaries.append(run_stream("BB84参照", pb, box))
+
     if protocol_mode in ["比較表示", "T12論文値のみ"]:
         st.subheader("T12論文値を計算中")
         pb = st.progress(0)
@@ -542,31 +496,34 @@ if st.button("100.66Mb級シミュレーション実行", type="primary"):
         st.markdown(f"#### {s['Protocol']}")
         metric_cards(s)
 
-    st.subheader("2. 後処理内訳")
-    post_df = pd.DataFrame([
-            {
-                "プロトコル": s["Protocol"],
-                "鍵候補長": s["鍵候補長"],
-                "ECブロック数": s["ECブロック数"],
-                "QBER推定公開ビット": s["QBER推定公開ビット"],
-                "EC入力長": s["EC入力長"],
-                "QBER[%]": s["QBER[%]"],
-                "phase error[%]": s["phase error[%]"],
-                "fEC": s["fEC"],
-                "EC leakage[bit]": s["EC leakage[bit]"],
-                "privacy term[bit]": s["privacy term[bit]"],
-                "finite penalty[bit]": s["finite penalty[bit]"],
-                "auth cost[bit]": s["auth cost[bit]"],
-                "EC fail prob[%]": s["EC fail prob[%]"],
-                "最終鍵長": s["最終鍵長"],
-                "推定secure rate[Mb/s]": s["推定secure rate[Mb/s]"],
-          }
-          for s in summaries
+    st.subheader("2. 実デコイ解析：Y1 と e1")
+    decoy_metrics = pd.DataFrame([
+        {
+            "プロトコル": s["Protocol"],
+            "Y0_est": s["Y0_est"],
+            "Y1_L": s["Y1_L"],
+            "Q1_L": s["Q1_L"],
+            "e1_U[%]": s["e1_U[%]"],
+            "X基底QBER[%]": s["X基底QBER[%]"],
+            "phase error[%]": s["phase error[%]"],
+        }
+        for s in summaries
     ])
-    
+    st.dataframe(format_numeric_tables(decoy_metrics), use_container_width=True)
+
+    for s in summaries:
+        st.markdown(f"#### {s['Protocol']} のデコイ推定")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Y0 推定", f"{s['Y0_est']:.3e}")
+        c2.metric("Y1 下限", f"{s['Y1_L']:.4f}")
+        c3.metric("Q1 下限", f"{s['Q1_L']:.4f}")
+        c4.metric("e1 上限", fmt_pct(s["e1_U[%]"]))
+
+    st.subheader("3. 後処理内訳")
+    post_df = build_post_df(summaries)
     st.dataframe(format_numeric_tables(post_df), use_container_width=True)
 
-    st.subheader("3. 効率比較")
+    st.subheader("4. BB84 ⇔ T12 比較グラフ")
     compare_df = pd.DataFrame([
         {
             "プロトコル": s["Protocol"],
@@ -578,71 +535,77 @@ if st.button("100.66Mb級シミュレーション実行", type="primary"):
         }
         for s in summaries
     ])
-
-    st.markdown("#### レート比較")
-    fig_rate = plot_horizontal_grouped(
-        compare_df,
-        ["推定sifted rate[Mb/s]", "推定secure rate[Mb/s]"],
-        "Sifted rate / Secure rate 比較",
-        "Mb/s",
-    )
-    st.plotly_chart(fig_rate, use_container_width=True)
-
-    st.markdown("#### 効率比較")
-    fig_eff = plot_horizontal_grouped(
-        compare_df,
-        ["理論選別効率[%]", "鍵候補効率[%]", "最終鍵効率[%]"],
-        "選別効率 / 鍵候補効率 / 最終鍵効率",
-        "%",
-    )
-    st.plotly_chart(fig_eff, use_container_width=True)
+    st.plotly_chart(plot_horizontal_grouped(compare_df, ["推定sifted rate[Mb/s]", "推定secure rate[Mb/s]"], "Sifted rate / Secure rate 比較", "Mb/s"), use_container_width=True)
+    st.plotly_chart(plot_horizontal_grouped(compare_df, ["理論選別効率[%]", "鍵候補効率[%]", "最終鍵効率[%]"], "効率比較", "%"), use_container_width=True)
     st.dataframe(format_numeric_tables(compare_df), use_container_width=True)
 
-    st.subheader("4. デコイ解析・光子数分布")
-    decoy_df = pd.DataFrame([
-        {
-            "プロトコル": s["Protocol"],
-            "Y0_est": s["Y0_est"],
-            "Y1_L": s["Y1_L"],
-            "Q1_L": s["Q1_L"],
-            "e1_U[%]": s["e1_U[%]"],
-            "X基底QBER[%]": s["X基底QBER[%]"],
-            "phase error[%]": s["phase error[%]"],
-            "0光子率[%]": s["0光子率[%]"],
-            "1光子率[%]": s["1光子率[%]"],
-            "多光子率[%]": s["多光子率[%]"],
-        }
-        for s in summaries
+    st.subheader("5. 光子数分布")
+    photon_df = pd.DataFrame([
+        {"プロトコル": s["Protocol"], "分類": "0光子", "割合[%]": s["0光子率[%]"]} for s in summaries
+    ] + [
+        {"プロトコル": s["Protocol"], "分類": "1光子", "割合[%]": s["1光子率[%]"]} for s in summaries
+    ] + [
+        {"プロトコル": s["Protocol"], "分類": "多光子", "割合[%]": s["多光子率[%]"]} for s in summaries
     ])
-
-    photon_df = decoy_df[["プロトコル", "0光子率[%]", "1光子率[%]", "多光子率[%]"]].melt(
-        id_vars="プロトコル", var_name="光子数分類", value_name="割合[%]"
-    )
-    fig_photon = px.bar(
-        photon_df,
-        y="プロトコル",
-        x="割合[%]",
-        color="光子数分類",
-        orientation="h",
-        barmode="group",
-        text="割合[%]",
-        title="光子数分布",
-    )
+    fig_photon = px.bar(photon_df, y="プロトコル", x="割合[%]", color="分類", orientation="h", barmode="group", text="割合[%]", title="光子数分布")
     fig_photon.update_traces(texttemplate="%{x:.2f}%", textposition="outside", cliponaxis=False)
-    fig_photon.update_layout(
-        xaxis_title="割合[%]",
-        yaxis_title="",
-        legend_title="",
-        height=360,
-        margin=dict(l=40, r=100, t=60, b=40),
-        font=dict(size=14),
-    )
+    fig_photon.update_layout(xaxis_title="割合[%]", yaxis_title="", legend_title="", height=360, margin=dict(l=40, r=100, t=60, b=40), font=dict(size=14))
     st.plotly_chart(fig_photon, use_container_width=True)
 
-    st.markdown("#### デコイ推定値")
-    st.dataframe(format_numeric_tables(decoy_df), use_container_width=True)
+    # Sensitivity target: prefer T12 if available, otherwise first summary.
+    target_summary = next((s for s in summaries if s["Protocol"] == "T12論文値"), summaries[0])
+    target_counts = target_summary["_counts"]
 
-    st.subheader("5. 最終鍵プレビュー")
+    st.subheader("6. ECブロックサイズ変更時のSKR変化")
+    block_values = [256_000, 512_000, 1_000_000, 2_000_000, 5_000_000]
+    block_rows = []
+    for block in block_values:
+        ss = finalize_counts(target_counts, ec_block_size_value=block)
+        block_rows.append({
+            "ECブロックサイズ": block,
+            "ECブロック数": ss["ECブロック数"],
+            "QBER推定公開ビット": ss["QBER推定公開ビット"],
+            "最終鍵長": ss["最終鍵長"],
+            "推定secure rate[Mb/s]": ss["推定secure rate[Mb/s]"],
+        })
+    block_df = pd.DataFrame(block_rows)
+    fig_block = px.line(block_df, x="ECブロックサイズ", y="推定secure rate[Mb/s]", markers=True, title=f"{target_summary['Protocol']} : ECブロックサイズとSKR")
+    fig_block.update_layout(xaxis_title="ECブロックサイズ [bit]", yaxis_title="推定secure rate [Mb/s]")
+    st.plotly_chart(fig_block, use_container_width=True)
+    st.dataframe(format_numeric_tables(block_df), use_container_width=True)
+
+    st.subheader("7. finite_sigma変更時のSKR変化")
+    sigma_values = [0.0, 0.5, 1.0, 2.0, 3.0, 5.0, 8.0, 10.0]
+    sigma_rows = []
+    for sig in sigma_values:
+        ss = finalize_counts(target_counts, finite_sigma_value=sig)
+        sigma_rows.append({
+            "finite_sigma": sig,
+            "phase error[%]": ss["phase error[%]"],
+            "finite penalty[bit]": ss["finite penalty[bit]"],
+            "最終鍵長": ss["最終鍵長"],
+            "推定secure rate[Mb/s]": ss["推定secure rate[Mb/s]"],
+        })
+    sigma_df = pd.DataFrame(sigma_rows)
+    fig_sigma = px.line(sigma_df, x="finite_sigma", y="推定secure rate[Mb/s]", markers=True, title=f"{target_summary['Protocol']} : finite_sigmaとSKR")
+    fig_sigma.update_layout(xaxis_title="finite_sigma", yaxis_title="推定secure rate [Mb/s]")
+    st.plotly_chart(fig_sigma, use_container_width=True)
+    st.dataframe(format_numeric_tables(sigma_df), use_container_width=True)
+
+    st.subheader("8. PA圧縮率0.292を外した場合の確認")
+    if target_summary["Protocol"] == "T12論文値":
+        with_cap = finalize_counts(target_counts, pa_cap_value=True)
+        without_cap = finalize_counts(target_counts, pa_cap_value=False)
+        pa_df = pd.DataFrame([
+            {"条件": "PA上限0.292あり", "最終鍵長": with_cap["最終鍵長"], "推定secure rate[Mb/s]": with_cap["推定secure rate[Mb/s]"]},
+            {"条件": "PA上限0.292なし", "最終鍵長": without_cap["最終鍵長"], "推定secure rate[Mb/s]": without_cap["推定secure rate[Mb/s]"]},
+        ])
+        st.dataframe(format_numeric_tables(pa_df), use_container_width=True)
+        st.info("PA上限なしでSKRが論文値より大きく出る場合、このアプリのPA/有限鍵モデルがまだ楽観的であることを示します。")
+    else:
+        st.info("PA圧縮率0.292の確認はT12論文値モードで表示します。")
+
+    st.subheader("9. 最終鍵プレビュー")
     for s in summaries:
         with st.expander(f"{s['Protocol']} の最終鍵プレビュー", expanded=False):
             if s["can_generate_key"] and s["最終鍵長"] > 0:
@@ -650,6 +613,5 @@ if st.button("100.66Mb級シミュレーション実行", type="primary"):
                 st.code(s["final_key"], language="text")
             else:
                 st.error("QBERが高い、または後処理後の鍵長が0以下のため、最終鍵は生成されませんでした。")
-
 else:
     st.info("左の条件を設定して、［100.66Mb級シミュレーション実行］を押してください。")

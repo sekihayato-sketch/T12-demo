@@ -154,8 +154,23 @@ def choose_bases(rng, n, protocol):
 
 
 def choose_intensities(rng, n):
-    labels = rng.choice(["u", "v", "w"], size=n, p=[p_u, p_v, p_w])
-    mu = np.where(labels == "u", mu_u, np.where(labels == "v", mu_v, mu_w))
+
+    probs = np.array([p_u, p_v, p_w], dtype=float)
+
+    probs /= probs.sum()
+
+    labels = rng.choice(
+        ["u", "v", "w"],
+        size=n,
+        p=probs
+    )
+
+    mu = np.where(
+        labels == "u",
+        mu_u,
+        np.where(labels == "v", mu_v, mu_w)
+    )
+
     return labels, mu
 
 

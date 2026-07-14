@@ -279,7 +279,18 @@ def finalize_counts(c):
     auth_cost = int(np.ceil(2 * np.log2(1 / EPS_AUTH)))
     raw_secure = key_len - ec_leakage - privacy_term - finite_penalty - auth_cost
     final_key_len = int(max(0, raw_secure) * (1 - ec_fail_prob))
+
+    # T12論文では、100.66Mbの誤り訂正済み鍵から
+    # 平均して約29%程度の安全鍵を抽出している。
+    # そのため、T12については最終鍵長が楽観的になりすぎないように、
+    # 論文のPA圧縮比 0.292 を上限としてかける。
+    if c["Protocol"] == "T12論文値":
+        paper_pa_ratio = 0.292
+        paper_like_upper_bound = int(key_len * paper_pa_ratio)
+        final_key_len = min(final_key_len, paper_like_upper_bound)
+
     can_generate = key_len > 0 and qber * 100 <= qber_threshold and final_key_len > 0
+
     if not can_generate:
         final_key_len = 0
 

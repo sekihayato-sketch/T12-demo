@@ -1,6 +1,7 @@
 import streamlit as st
 import numpy as np
 import pandas as pd
+import plotly.express as px
 import time
 import hashlib
 
@@ -341,14 +342,64 @@ def run_stream(protocol, progress_bar=None, status_box=None):
     return finalize_counts(counts)
 
 
-def show_summary(s):
-    c1, c2, c3, c4, c5, c6 = st.columns(6)
-    c1.metric("送信", fmt_si(s["送信パルス数"]))
-    c2.metric("検出", fmt_si(s["検出数"]))
-    c3.metric("鍵候補", fmt_si(s["鍵候補長"]))
-    c4.metric("QBER", fmt_pct(s["QBER[%]"]))
-    c5.metric("最終鍵", fmt_si(s["最終鍵長"], "bit"))
-    c6.metric("推定SKR", fmt_si(s["推定secure rate[Mb/s]"] * 1e6, "b/s"))
+def metric_cards(s):
+    cards = [
+        ("送信", fmt_si(s["送信パルス数"])),
+        ("検出", fmt_si(s["検出数"])),
+        ("鍵候補", fmt_si(s["鍵候補長"])),
+        ("QBER", fmt_pct(s["QBER[%]"])),
+        ("最終鍵", fmt_si(s["最終鍵長"], "bit")),
+        ("推定SKR", fmt_si(s["推定secure rate[Mb/s]"] * 1e6, "b/s")),
+    ]
+    html = "<div style='display:grid; grid-template-columns:repeat(6, minmax(135px, 1fr)); gap:12px; margin:8px 0 28px 0;'>"
+    for label, value in cards:
+        html += f"""
+        <div style='border:1px solid #e5e7eb; border-radius:14px; padding:14px 12px; background:#ffffff; min-height:94px;'>
+            <div style='font-size:15px; color:#6b7280; font-weight:700; margin-bottom:8px; white-space:nowrap;'>{label}</div>
+            <div style='font-size:30px; color:#111827; font-weight:800; line-height:1.15; white-space:nowrap; overflow:visible;'>{value}</div>
+        </div>
+        """
+    html += "</div>"
+    st.markdown(html, unsafe_allow_html=True)
+
+
+def format_numeric_tables(df):
+    out = df.copy()
+    for col in out.columns:
+        if col in ["プロトコル"]:
+            continue
+        if pd.api.types.is_numeric_dtype(out[col]):
+            if "[%]" in col or "QBER" in col or "error" in col or "効率" in col or "prob" in col:
+                out[col] = out[col].map(lambda x: f"{x:.3f}")
+            elif "rate" in col or "Mb/s" in col:
+                out[col] = out[col].map(lambda x: f"{x:.2f}")
+            else:
+                out[col] = out[col].map(lambda x: fmt_si(x))
+    return out
+
+
+def plot_horizontal_grouped(df, value_cols, title, x_title):
+    plot_df = df.melt(id_vars="プロトコル", value_vars=value_cols, var_name="項目", value_name="値")
+    fig = px.bar(
+        plot_df,
+        y="プロトコル",
+        x="値",
+        color="項目",
+        orientation="h",
+        barmode="group",
+        text="値",
+        title=title,
+    )
+    fig.update_traces(texttemplate="%{x:.2f}", textposition="outside", cliponaxis=False)
+    fig.update_layout(
+        xaxis_title=x_title,
+        yaxis_title="",
+        legend_title="",
+        height=360,
+        margin=dict(l=40, r=80, t=60, b=40),
+        font=dict(size=14),
+    )
+    return fig
 
 
 if st.button("100.66Mb級シミュレーション実行", type="primary"):
@@ -373,7 +424,7 @@ if st.button("100.66Mb級シミュレーション実行", type="primary"):
     st.subheader("1. 全体結果")
     for s in summaries:
         st.markdown(f"#### {s['Protocol']}")
-        show_summary(s)
+        metric_cards(s)
 
     st.subheader("2. 後処理内訳")
     post_df = pd.DataFrame([
@@ -393,7 +444,7 @@ if st.button("100.66Mb級シミュレーション実行", type="primary"):
         }
         for s in summaries
     ])
-    st.dataframe(post_df, use_container_width=True)
+    st.dataframe(format_numeric_tables(post_df), use_container_width=True)
 
     st.subheader("3. 効率比較")
     compare_df = pd.DataFrame([
@@ -407,8 +458,25 @@ if st.button("100.66Mb級シミュレーション実行", type="primary"):
         }
         for s in summaries
     ])
-    st.dataframe(compare_df, use_container_width=True)
-    st.bar_chart(compare_df.set_index("プロトコル")[["推定sifted rate[Mb/s]", "推定secure rate[Mb/s]"]])
+
+    st.markdown("#### レート比較")
+    fig_rate = plot_horizontal_grouped(
+        compare_df,
+        ["推定sifted rate[Mb/s]", "推定secure rate[Mb/s]"],
+        "Sifted rate / Secure rate 比較",
+        "Mb/s",
+    )
+    st.plotly_chart(fig_rate, use_container_width=True)
+
+    st.markdown("#### 効率比較")
+    fig_eff = plot_horizontal_grouped(
+        compare_df,
+        ["理論選別効率[%]", "鍵候補効率[%]", "最終鍵効率[%]"],
+        "選別効率 / 鍵候補効率 / 最終鍵効率",
+        "%",
+    )
+    st.plotly_chart(fig_eff, use_container_width=True)
+    st.dataframe(format_numeric_tables(compare_df), use_container_width=True)
 
     st.subheader("4. デコイ解析・光子数分布")
     decoy_df = pd.DataFrame([
@@ -426,7 +494,33 @@ if st.button("100.66Mb級シミュレーション実行", type="primary"):
         }
         for s in summaries
     ])
-    st.dataframe(decoy_df, use_container_width=True)
+
+    photon_df = decoy_df[["プロトコル", "0光子率[%]", "1光子率[%]", "多光子率[%]"]].melt(
+        id_vars="プロトコル", var_name="光子数分類", value_name="割合[%]"
+    )
+    fig_photon = px.bar(
+        photon_df,
+        y="プロトコル",
+        x="割合[%]",
+        color="光子数分類",
+        orientation="h",
+        barmode="group",
+        text="割合[%]",
+        title="光子数分布",
+    )
+    fig_photon.update_traces(texttemplate="%{x:.2f}%", textposition="outside", cliponaxis=False)
+    fig_photon.update_layout(
+        xaxis_title="割合[%]",
+        yaxis_title="",
+        legend_title="",
+        height=360,
+        margin=dict(l=40, r=100, t=60, b=40),
+        font=dict(size=14),
+    )
+    st.plotly_chart(fig_photon, use_container_width=True)
+
+    st.markdown("#### デコイ推定値")
+    st.dataframe(format_numeric_tables(decoy_df), use_container_width=True)
 
     st.subheader("5. 最終鍵プレビュー")
     for s in summaries:

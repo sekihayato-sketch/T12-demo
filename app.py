@@ -66,7 +66,7 @@ with st.sidebar:
     st.markdown("---")
     st.subheader("後処理")
     qber_threshold = st.slider("鍵破棄しきい値 QBER [%]", 0.0, 20.0, 11.0, step=0.5)
-    finite_sigma = st.slider("有限サイズ補正 sigma", 0.0, 10.0, 5.0, step=0.5)
+    finite_sigma = st.slider("有限サイズ補正 sigma", 0.0, 10.0, 1.0, step=0.5)
     ec_fail_prob = st.slider("EC復号失敗率 [%]", 0.0, 5.0, EC_FAIL_PROB_DEFAULT * 100, step=0.01) / 100.0
     ec_model = st.radio("ECモデル", ["LDPC風・QBER依存", "固定fEC"], index=0)
     fixed_f_ec = st.slider("固定 fEC", 1.00, 2.00, 1.34, step=0.01)
@@ -270,7 +270,7 @@ def finalize_counts(c):
     key_len = c["key_len"]
     qber = c["key_errors"] / max(key_len, 1)
     x_qber = c["x_errors"] / max(c["x_len"], 1)
-    finite_margin = finite_sigma / np.sqrt(max(c["x_len"], 1))
+    finite_margin = 0.2 * finite_sigma / np.sqrt(max(c["x_len"], 1))
     phase_error = min(0.5, x_qber + finite_margin)
     f_ec = f_ec_ldpc_like(qber) if ec_model == "LDPC風・QBER依存" else fixed_f_ec
     ec_leakage = int(round(f_ec * h2(qber) * key_len)) if key_len > 0 else 0

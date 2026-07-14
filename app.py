@@ -343,7 +343,7 @@ def run_stream(protocol, progress_bar=None, status_box=None):
 
 
 def metric_cards(s):
-    cards = [
+    items = [
         ("送信", fmt_si(s["送信パルス数"])),
         ("検出", fmt_si(s["検出数"])),
         ("鍵候補", fmt_si(s["鍵候補長"])),
@@ -351,17 +351,19 @@ def metric_cards(s):
         ("最終鍵", fmt_si(s["最終鍵長"], "bit")),
         ("推定SKR", fmt_si(s["推定secure rate[Mb/s]"] * 1e6, "b/s")),
     ]
-    html = "<div style='display:grid; grid-template-columns:repeat(6, minmax(135px, 1fr)); gap:12px; margin:8px 0 28px 0;'>"
-    for label, value in cards:
-        html += f"""
-        <div style='border:1px solid #e5e7eb; border-radius:14px; padding:14px 12px; background:#ffffff; min-height:94px;'>
-            <div style='font-size:15px; color:#6b7280; font-weight:700; margin-bottom:8px; white-space:nowrap;'>{label}</div>
-            <div style='font-size:30px; color:#111827; font-weight:800; line-height:1.15; white-space:nowrap; overflow:visible;'>{value}</div>
-        </div>
-        """
-    html += "</div>"
-    st.markdown(html, unsafe_allow_html=True)
 
+    row1 = st.columns(3)
+    row2 = st.columns(3)
+
+    for col, (label, value) in zip(row1, items[:3]):
+        with col:
+            st.markdown(f"**{label}**")
+            st.markdown(f"### `{value}`")
+
+    for col, (label, value) in zip(row2, items[3:]):
+        with col:
+            st.markdown(f"**{label}**")
+            st.markdown(f"### `{value}`")
 
 def format_numeric_tables(df):
     out = df.copy()

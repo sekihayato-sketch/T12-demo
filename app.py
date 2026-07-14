@@ -5,13 +5,12 @@ import plotly.express as px
 import time
 import hashlib
 
-st.set_page_config(page_title="T12 QKD 100.66Mb Simulator", layout="wide")
+st.set_page_config(page_title="T12 QKD Intern Simulator", layout="wide")
 
 # =============================
 # T12 paper-like constants
 # =============================
 PULSE_RATE_HZ = 1_000_000_000
-PA_DATASET_BITS_DEFAULT = 100.66e6
 MU_U = 0.4
 MU_V = 0.1
 MU_W = 0.0007
@@ -24,26 +23,78 @@ EPS_AUTH = 1e-10
 EC_FAIL_PROB_DEFAULT = 0.0073
 PAPER_PA_RATIO = 0.292
 
+# =============================
+# Default UI values
+# =============================
+DEFAULT_DATASET_SIZE = 100_660_000
+DEFAULT_CHUNK_SIZE = 1_000_000
+DEFAULT_PROTOCOL_MODE = "比較表示"
+
+DEFAULT_SPD_EFF_PERCENT = 31.0
+DEFAULT_RX_LOSS_DB = 1.6
+DEFAULT_CHANNEL_LOSS_DB = 2.0
+DEFAULT_DARK_COUNT_PERCENT = 0.045
+DEFAULT_EOPT_PERCENT = 3.0
+DEFAULT_AFTERPULSE_PERCENT = 0.0
+
+DEFAULT_QBER_THRESHOLD_PERCENT = 11.0
+DEFAULT_FINITE_SIGMA = 1.0
+DEFAULT_EC_BLOCK_SIZE = 1_000_000
+DEFAULT_QBER_SAMPLE_BITS = 8192
+DEFAULT_EC_FAIL_PERCENT = EC_FAIL_PROB_DEFAULT * 100
+DEFAULT_FIXED_F_EC = 1.34
+
+
+def reset_to_defaults():
+    st.session_state["dataset_size"] = DEFAULT_DATASET_SIZE
+    st.session_state["protocol_mode"] = DEFAULT_PROTOCOL_MODE
+    st.session_state["chunk_size"] = DEFAULT_CHUNK_SIZE
+
+    st.session_state["spd_eff_percent"] = DEFAULT_SPD_EFF_PERCENT
+    st.session_state["rx_loss_db"] = DEFAULT_RX_LOSS_DB
+    st.session_state["channel_loss_db"] = DEFAULT_CHANNEL_LOSS_DB
+    st.session_state["dark_count_percent"] = DEFAULT_DARK_COUNT_PERCENT
+    st.session_state["eopt_percent"] = DEFAULT_EOPT_PERCENT
+    st.session_state["afterpulse_percent"] = DEFAULT_AFTERPULSE_PERCENT
+
+    st.session_state["eve_enabled"] = False
+    st.session_state["eve_rate_percent"] = 0
+
+    st.session_state["qber_threshold_percent"] = DEFAULT_QBER_THRESHOLD_PERCENT
+    st.session_state["finite_sigma"] = DEFAULT_FINITE_SIGMA
+    st.session_state["ec_block_size"] = DEFAULT_EC_BLOCK_SIZE
+    st.session_state["qber_sample_bits_per_block"] = DEFAULT_QBER_SAMPLE_BITS
+    st.session_state["ec_fail_percent"] = DEFAULT_EC_FAIL_PERCENT
+    st.session_state["ec_model"] = "LDPC風・QBER依存"
+    st.session_state["fixed_f_ec"] = DEFAULT_FIXED_F_EC
+    st.session_state["use_paper_pa_cap"] = True
+
+
 st.title("インターン向け T12 QKDシミュレータ")
-st.caption("100.66Mb級のT12論文値を使い、BB84との違い・デコイ解析・EC/PA後処理が鍵生成率に与える影響を確認します。")
+st.caption("デフォルト設定でT12論文値に近い条件を再現し、BB84との違い・デコイ解析・EC/PA後処理の影響を確認します。")
 
 st.markdown("""
 このアプリは、QKDの後処理をインターン生にも説明しやすくするための **教育用シミュレータ** です。
 巨大なビット列や基底表は保持せず、チャンクごとに集計値だけを加算することで、**100.66Mパルス級**の計算を扱います。
 
-### 何を見るアプリか
+### このアプリで確認できること
 - **BB84参照**：Z/X基底を50:50で選ぶ基本モデルです。
 - **T12論文値**：Z基底を高確率で選び、鍵生成に使えるZ/Z一致を増やすモデルです。
 - **デコイ解析**：signal/decoy/vacuumの検出率から、単一光子成分の寄与を推定します。
 - **EC/PA後処理**：QBER推定公開、ECリーク、位相誤り、有限サイズ補正、認証コスト、復号失敗率が最終鍵長に与える影響を見ます。
 
-### 主なT12パラメータ
+### デフォルト設定の意味
 ```text
-pZ = 96.677%, pX = 3.323%
-u/v/w = 0.4 / 0.1 / 0.0007 photons/pulse
-p_u/p_v/p_w = 96.973% / 1.661% / 1.466%
-p_st = 1/128
-PA dataset = 100.66 Mb
+送信パルス数 = 100.66M
+SPD効率 = 31.0%
+受信光学損失 = 1.6 dB
+チャネル損失 = 2.0 dB
+暗計数率Y0 = 0.045 %/pulse
+Eopt = 3.0%
+有限サイズ補正 sigma = 1.0
+ECブロックサイズ = 1Mbit
+QBER推定公開ビット = 8192 bit/block
+T12 PA圧縮比上限 = 0.292
 ```
 """)
 
@@ -52,52 +103,183 @@ PA dataset = 100.66 Mb
 # =============================
 with st.sidebar:
     st.header("シミュレーション条件")
+
+    if st.button("デフォルト設定に戻す"):
+        reset_to_defaults()
+        st.rerun()
+
     dataset_size = st.select_slider(
         "送信パルス数 / PA datasetサイズ",
         options=[1_048_576, 4_194_304, 16_777_216, 33_554_432, 67_108_864, 100_660_000],
-        value=100_660_000,
+        value=DEFAULT_DATASET_SIZE,
+        key="dataset_size",
     )
-    protocol_mode = st.radio("表示モード", ["比較表示", "BB84参照のみ", "T12論文値のみ"], index=0)
+
+    protocol_mode = st.radio(
+        "表示モード",
+        ["比較表示", "BB84参照のみ", "T12論文値のみ"],
+        index=0,
+        key="protocol_mode",
+    )
+
     chunk_size = st.select_slider(
         "内部処理チャンクサイズ",
         options=[250_000, 500_000, 1_000_000, 2_000_000, 5_000_000],
-        value=1_000_000,
+        value=DEFAULT_CHUNK_SIZE,
+        key="chunk_size",
     )
     st.caption("チャンクサイズを大きくすると速くなる場合がありますが、メモリ使用量も増えます。")
 
     st.markdown("---")
     st.subheader("物理・検出条件")
-    spd_efficiency = st.slider("SPD効率 [%]", 1.0, 100.0, 31.0, step=0.1) / 100.0
-    receiver_optical_loss_db = st.slider("受信光学損失 [dB]", 0.0, 10.0, 1.6, step=0.1)
-    channel_loss_db = st.slider("チャネル損失 [dB]", 0.0, 30.0, 2.0, step=0.1)
+
+    spd_efficiency = st.slider(
+        "SPD効率 [%]",
+        1.0,
+        100.0,
+        DEFAULT_SPD_EFF_PERCENT,
+        step=0.1,
+        key="spd_eff_percent",
+    ) / 100.0
+
+    receiver_optical_loss_db = st.slider(
+        "受信光学損失 [dB]",
+        0.0,
+        10.0,
+        DEFAULT_RX_LOSS_DB,
+        step=0.1,
+        key="rx_loss_db",
+    )
+
+    channel_loss_db = st.slider(
+        "チャネル損失 [dB]",
+        0.0,
+        30.0,
+        DEFAULT_CHANNEL_LOSS_DB,
+        step=0.1,
+        key="channel_loss_db",
+    )
+
     total_detection_efficiency = spd_efficiency * 10 ** (-(receiver_optical_loss_db + channel_loss_db) / 10)
     st.caption(
         f"総合検出効率 η = {total_detection_efficiency * 100:.2f}% "
         f"= SPD効率 × 10^(-損失/10)"
     )
 
-    dark_count_rate = st.slider("暗計数率 Y0 [%/pulse]", 0.0, 1.0, 0.045, step=0.001) / 100.0
-    optical_error_rate = st.slider("光学系・通信路由来の誤り率 Eopt [%]", 0.0, 10.0, 3.0, step=0.1) / 100.0
-    afterpulse_error_rate = st.slider("アフターパルス由来の追加誤り率 [%]", 0.0, 10.0, 0.0, step=0.1) / 100.0
+    dark_count_rate = st.slider(
+        "暗計数率 Y0 [%/pulse]",
+        0.0,
+        1.0,
+        DEFAULT_DARK_COUNT_PERCENT,
+        step=0.001,
+        key="dark_count_percent",
+    ) / 100.0
+
+    optical_error_rate = st.slider(
+        "光学系・通信路由来の誤り率 Eopt [%]",
+        0.0,
+        10.0,
+        DEFAULT_EOPT_PERCENT,
+        step=0.1,
+        key="eopt_percent",
+    ) / 100.0
+
+    afterpulse_error_rate = st.slider(
+        "アフターパルス由来の追加誤り率 [%]",
+        0.0,
+        10.0,
+        DEFAULT_AFTERPULSE_PERCENT,
+        step=0.1,
+        key="afterpulse_percent",
+    ) / 100.0
 
     st.markdown("---")
     st.subheader("Eve")
-    eve_enabled = st.checkbox("遮断・再送信攻撃を有効化", value=False)
-    eve_rate = st.slider("Eve介入率 [%]", 0, 100, 0, step=5, disabled=not eve_enabled) / 100.0
+
+    eve_enabled = st.checkbox(
+        "遮断・再送信攻撃を有効化",
+        value=False,
+        key="eve_enabled",
+    )
+
+    eve_rate = st.slider(
+        "Eve介入率 [%]",
+        0,
+        100,
+        0,
+        step=5,
+        disabled=not eve_enabled,
+        key="eve_rate_percent",
+    ) / 100.0
 
     st.markdown("---")
     st.subheader("後処理")
-    qber_threshold = st.slider("鍵破棄しきい値 QBER [%]", 0.0, 20.0, 11.0, step=0.5)
-    finite_sigma = st.slider("有限サイズ補正 sigma", 0.0, 10.0, 1.0, step=0.5)
-    ec_block_size = st.select_slider("ECブロックサイズ [bit]", options=[256_000, 512_000, 1_000_000, 2_000_000, 5_000_000], value=1_000_000)
-    qber_sample_bits_per_block = st.select_slider("QBER推定公開ビット/ECブロック", options=[0, 4096, 8192, 16384, 32768], value=8192)
-    ec_fail_prob = st.slider("EC復号失敗率 [%]", 0.0, 5.0, EC_FAIL_PROB_DEFAULT * 100, step=0.01) / 100.0
-    ec_model = st.radio("ECモデル", ["LDPC風・QBER依存", "固定fEC"], index=0)
-    fixed_f_ec = st.slider("固定 fEC", 1.00, 2.00, 1.34, step=0.01)
-    use_paper_pa_cap = st.checkbox("T12に論文PA圧縮比0.292の上限を適用", value=True)
+
+    qber_threshold = st.slider(
+        "鍵破棄しきい値 QBER [%]",
+        0.0,
+        20.0,
+        DEFAULT_QBER_THRESHOLD_PERCENT,
+        step=0.5,
+        key="qber_threshold_percent",
+    )
+
+    finite_sigma = st.slider(
+        "有限サイズ補正 sigma",
+        0.0,
+        10.0,
+        DEFAULT_FINITE_SIGMA,
+        step=0.5,
+        key="finite_sigma",
+    )
+
+    ec_block_size = st.select_slider(
+        "ECブロックサイズ [bit]",
+        options=[256_000, 512_000, 1_000_000, 2_000_000, 5_000_000],
+        value=DEFAULT_EC_BLOCK_SIZE,
+        key="ec_block_size",
+    )
+
+    qber_sample_bits_per_block = st.select_slider(
+        "QBER推定公開ビット/ECブロック",
+        options=[0, 4096, 8192, 16384, 32768],
+        value=DEFAULT_QBER_SAMPLE_BITS,
+        key="qber_sample_bits_per_block",
+    )
+
+    ec_fail_prob = st.slider(
+        "EC復号失敗率 [%]",
+        0.0,
+        5.0,
+        DEFAULT_EC_FAIL_PERCENT,
+        step=0.01,
+        key="ec_fail_percent",
+    ) / 100.0
+
+    ec_model = st.radio(
+        "ECモデル",
+        ["LDPC風・QBER依存", "固定fEC"],
+        index=0,
+        key="ec_model",
+    )
+
+    fixed_f_ec = st.slider(
+        "固定 fEC",
+        1.00,
+        2.00,
+        DEFAULT_FIXED_F_EC,
+        step=0.01,
+        key="fixed_f_ec",
+    )
+
+    use_paper_pa_cap = st.checkbox(
+        "T12に論文PA圧縮比0.292の上限を適用",
+        value=True,
+        key="use_paper_pa_cap",
+    )
 
 # =============================
-# Utility
+# Utility functions
 # =============================
 def fmt_si(value, suffix="", decimals=2):
     try:
@@ -552,7 +734,6 @@ if st.button("100.66Mb級シミュレーション実行", type="primary"):
     fig_photon.update_layout(xaxis_title="割合[%]", yaxis_title="", legend_title="", height=360, margin=dict(l=40, r=100, t=60, b=40), font=dict(size=14))
     st.plotly_chart(fig_photon, use_container_width=True)
 
-    # Sensitivity target: prefer T12 if available, otherwise first summary.
     target_summary = next((s for s in summaries if s["Protocol"] == "T12論文値"), summaries[0])
     target_counts = target_summary["_counts"]
 

@@ -22,6 +22,10 @@ P_Z_T12 = 0.96677
 P_ST = 1 / 128
 EPS_AUTH = 1e-10
 EC_FAIL_PROB_DEFAULT = 0.0073
+EC_BLOCK_SIZE = 1_000_000
+EC_SAMPLE_BITS_PER_BLOCK = 8_192
+PAPER_PA_RATIO = 0.292
+USE_PAPER_PA_CAP = True
 
 st.title("BB84 / T12 100.66Mb 実装値寄せシミュレータ")
 st.caption("基底表・詳細表・アニメーションを削除し、100.66Mb級データセットをチャンク処理で直接シミュレーションします。")
@@ -306,12 +310,75 @@ def finalize_counts(c):
     finite_margin = 0.2 * finite_sigma / np.sqrt(max(c["x_len"], 1))
     phase_error = min(0.5, x_qber + finite_margin)
     f_ec = f_ec_ldpc_like(qber) if ec_model == "LDPC風・QBER依存" else fixed_f_ec
-    ec_leakage = int(round(f_ec * h2(qber) * key_len)) if key_len > 0 else 0
-    privacy_term = int(round(key_len * h2(phase_error))) if key_len > 0 else 0
-    finite_penalty = int(np.ceil(finite_sigma * np.sqrt(max(key_len, 1)) * np.log2(max(key_len, 2)))) if key_len > 0 else 0
+    
+    # =============================
+    # EC block processing model
+    # =============================
+    
+    # ECブロック数
+    num_ec_blocks = int(np.ceil(key_len / EC_BLOCK_SIZE)) if key_len > 0 else 0
+    
+    # 各ECブロックでQBER推定用に公開・破棄するビット数
+    qber_sample_bits = min(
+        key_len,
+        num_ec_blocks * EC_SAMPLE_BITS_PER_BLOCK
+    )
+    
+    # QBER推定に使ったビットは公開されるため、最終鍵には使わない
+    ec_input_len = max(0, key_len - qber_sample_bits)
+    
+    # =============================
+    # EC leakage
+    # =============================
+    
+    # LDPCそのものを復号するのではなく、
+    # LDPC風に fEC * H2(QBER) * EC対象長 で公開情報量を見積もる
+    ec_leakage = int(round(f_ec * h2(qber) * ec_input_len)) if ec_input_len > 0 else 0
+    
+    # =============================
+    # Phase error / Privacy amplification
+    # =============================
+    
+    privacy_term = int(round(ec_input_len * h2(phase_error))) if ec_input_len > 0 else 0
+    
+    # =============================
+    # Finite-size penalty
+    # =============================
+    
+    finite_penalty = int(
+        np.ceil(
+            finite_sigma
+            * np.sqrt(max(ec_input_len, 1))
+            * np.log2(max(ec_input_len, 2))
+        )
+    ) if ec_input_len > 0 else 0
+    
+    # =============================
+    # Authentication cost
+    # =============================
+    
     auth_cost = int(np.ceil(2 * np.log2(1 / EPS_AUTH)))
-    raw_secure = key_len - ec_leakage - privacy_term - finite_penalty - auth_cost
+    
+    # =============================
+    # Final key length
+    # =============================
+    
+    raw_secure = (
+        ec_input_len
+        - ec_leakage
+        - privacy_term
+        - finite_penalty
+        - auth_cost
+    )
+    
     final_key_len = int(max(0, raw_secure) * (1 - ec_fail_prob))
+    
+    # T12論文値再現モード：
+    # 論文ではPA圧縮比が約0.292なので、
+    # T12については楽観的になりすぎないよう上限をかける。
+    if c["Protocol"] == "T12論文値" and USE_PAPER_PA_CAP:
+        paper_like_upper_bound = int(ec_input_len * PAPER_PA_RATIO)
+        final_key_len = min(final_key_len, paper_like_upper_bound)
 
     # T12論文では、100.66Mbの誤り訂正済み鍵から
     # 平均して約29%程度の安全鍵を抽出している。
@@ -341,6 +408,9 @@ def finalize_counts(c):
         "Z/Z一致数": c["z_match"],
         "X/X一致数": c["x_match"],
         "鍵候補長": key_len,
+        "ECブロック数": num_ec_blocks,
+        "QBER推定公開ビット": qber_sample_bits,
+        "EC入力長": ec_input_len,
         "鍵候補効率[%]": key_len / N * 100,
         "理論選別効率[%]": theory_sift * 100,
         "誤り数": c["key_errors"],
@@ -474,22 +544,26 @@ if st.button("100.66Mb級シミュレーション実行", type="primary"):
 
     st.subheader("2. 後処理内訳")
     post_df = pd.DataFrame([
-        {
-            "プロトコル": s["Protocol"],
-            "鍵候補長": s["鍵候補長"],
-            "QBER[%]": s["QBER[%]"],
-            "phase error[%]": s["phase error[%]"],
-            "fEC": s["fEC"],
-            "EC leakage[bit]": s["EC leakage[bit]"],
-            "privacy term[bit]": s["privacy term[bit]"],
-            "finite penalty[bit]": s["finite penalty[bit]"],
-            "auth cost[bit]": s["auth cost[bit]"],
-            "EC fail prob[%]": s["EC fail prob[%]"],
-            "最終鍵長": s["最終鍵長"],
-            "推定secure rate[Mb/s]": s["推定secure rate[Mb/s]"],
-        }
-        for s in summaries
+            {
+                "プロトコル": s["Protocol"],
+                "鍵候補長": s["鍵候補長"],
+                "ECブロック数": s["ECブロック数"],
+                "QBER推定公開ビット": s["QBER推定公開ビット"],
+                "EC入力長": s["EC入力長"],
+                "QBER[%]": s["QBER[%]"],
+                "phase error[%]": s["phase error[%]"],
+                "fEC": s["fEC"],
+                "EC leakage[bit]": s["EC leakage[bit]"],
+                "privacy term[bit]": s["privacy term[bit]"],
+                "finite penalty[bit]": s["finite penalty[bit]"],
+                "auth cost[bit]": s["auth cost[bit]"],
+                "EC fail prob[%]": s["EC fail prob[%]"],
+                "最終鍵長": s["最終鍵長"],
+                "推定secure rate[Mb/s]": s["推定secure rate[Mb/s]"],
+          }
+          for s in summaries
     ])
+    
     st.dataframe(format_numeric_tables(post_df), use_container_width=True)
 
     st.subheader("3. 効率比較")

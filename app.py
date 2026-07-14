@@ -53,7 +53,40 @@ with st.sidebar:
 
     st.markdown("---")
     st.subheader("物理・検出条件")
-    total_detection_efficiency = st.slider("総合検出効率 η [%]", 1.0, 50.0, 13.5, step=0.1) / 100.0
+
+    spd_efficiency = st.slider(
+        "SPD効率 [%]",
+        1.0,
+        100.0,
+        31.0,
+        step=0.1
+    ) / 100.0
+
+    receiver_optical_loss_db = st.slider(
+        "受信光学損失 [dB]",
+        0.0,
+        10.0,
+        1.6,
+        step=0.1
+    )
+
+    channel_loss_db = st.slider(
+        "チャネル損失 [dB]",
+        0.0,
+        30.0,
+        2.0,
+        step=0.1
+    )
+
+    total_detection_efficiency = spd_efficiency * 10 ** (
+        -(receiver_optical_loss_db + channel_loss_db) / 10
+    )
+
+    st.caption(
+        f"総合検出効率 η = {total_detection_efficiency * 100:.2f}% "
+        f"(SPD効率 × 受信光学損失 × チャネル損失)"
+    )
+    
     dark_count_rate = st.slider("暗計数率 Y0 [%/pulse]", 0.0, 1.0, 0.045, step=0.001) / 100.0
     optical_error_rate = st.slider("光学系・通信路由来の誤り率 Eopt [%]", 0.0, 10.0, 3.0, step=0.1) / 100.0
     afterpulse_error_rate = st.slider("アフターパルス由来の追加誤り率 [%]", 0.0, 10.0, 0.0, step=0.1) / 100.0

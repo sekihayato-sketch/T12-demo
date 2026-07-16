@@ -40,7 +40,7 @@ DEFAULT_PROTOCOL_MODE = "比較表示"
 # Experimental detector values from the 2013 paper
 DEFAULT_SPD_EFF_PERCENT = 20.5
 DEFAULT_DARK_COUNT_PERCENT = 0.0021  # 2.1e-5 per gate = 0.0021% / pulse
-DEFAULT_AFTERPULSE_PERCENT = 5.25
+DEFAULT_AFTERPULSE_PERCENT = 0.0
 
 # 50 km fibre at ~0.2 dB/km -> 10 dB. Receiver loss is an effective optical loss.
 DEFAULT_CHANNEL_LOSS_DB = 10.0
@@ -85,7 +85,7 @@ def reset_defaults():
 
 
 st.title("T12 2013論文再現シミュレータ")
-st.caption("Lucamarini et al. 2013 のT12有限サイズ・デコイ状態QKD論文に合わせた教育用シミュレータです。固定PA圧縮率0.292は使いません。")
+st.caption("Lucamarini et al. 2013 のT12有限サイズ・デコイ状態QKD論文に合わせた教育用シミュレータです。固定PA圧縮率0.292は使いません。アフターパルスは実装依存の時間相関なので、理論再現デフォルトでは0%にしています。")
 
 st.markdown("""
 このアプリは、**Efficient decoy-state quantum key distribution with quantified security** のT12プロトコルを再現するための教育用シミュレータです。
@@ -104,7 +104,7 @@ u = 0.425, v = 0.044, w = 0.001
 p_u = 253/256, p_v = 1/128, p_w = 1/256
 SPD efficiency = 20.5%
 dark count probability = 2.1e-5 / gate
-APD afterpulse probability = 5.25%
+APD afterpulse probability = 5.25%（実機特性。理論再現デフォルトでは時間相関を直接モデル化しないため0%）
 epsilon = 1e-10
 ```
 """)
@@ -226,15 +226,20 @@ def simulate_chunk(rng, size, protocol, counts):
     photon_detected = rng.random(size) < eta_i
     dark_detected = rng.random(size) < dark_count_rate
 
-    # Simple afterpulse model: extra random click probability afterpulse_percent times real detected fraction.
-    afterpulse_detected = (rng.random(size) < afterpulse_percent) & photon_detected
+    # Afterpulse handling for theory-oriented reproduction.
+    # The paper reports APD afterpulse probability as a detector characteristic, but a proper
+    # afterpulse model requires time correlation with previous avalanches. Treating every
+    # afterpulse as an independent 50% random error overestimates QBER and can kill the key.
+    # Therefore this simplified app uses afterpulse_percent only as an optional extra click
+    # probability, and does not force a 50% error on those clicks.
+    afterpulse_detected = (rng.random(size) < afterpulse_percent) & photon_detected & (~dark_detected)
     detected = photon_detected | dark_detected | afterpulse_detected
 
-    # Error model: optical modulation error + dark-only random errors + afterpulse random-ish errors.
+    # Error model: optical/modulation error plus dark-only random errors.
+    # Afterpulse clicks inherit the ordinary optical error model in this simplified simulator.
     error_prob = np.full(size, optical_error_rate, dtype=np.float32)
     dark_only = dark_detected & (~photon_detected)
     error_prob[dark_only] = 0.5
-    error_prob[afterpulse_detected] = np.maximum(error_prob[afterpulse_detected], 0.5)
 
     if eve_enabled:
         eve = (rng.random(size) < eve_rate) & detected

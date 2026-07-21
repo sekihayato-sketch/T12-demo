@@ -84,7 +84,7 @@ def reset_defaults():
     st.session_state["eve_rate_percent"] = 0
 
 
-st.title("T12 2013論文再現シミュレータ")
+st.title("T12 2013論文シミュレータ")
 st.caption("Lucamarini et al. 2013 のT12有限サイズ・デコイ状態QKD論文に合わせた教育用シミュレータです。固定PA圧縮率0.292は使いません。アフターパルスは実装依存の時間相関なので、理論再現デフォルトでは0%にしています。")
 
 st.markdown("""

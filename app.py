@@ -299,7 +299,7 @@ def simple_decoy_for_basis(c, basis):
             - Qu * np.exp(mu) * (nu * nu / (mu * mu))
             - ((mu * mu - nu * nu) / (mu * mu)) * y0
         )
-        y1 = max(0.0, min(1.0, y1))
+        y1 = max(y0, min(1,y1))
 
     if mu * y1 > 0:
         q1 = (QBERu * Qu * np.exp(mu) - 0.5 * y0) / (mu * y1)
@@ -334,22 +334,21 @@ def calc_basis_key(c, key_basis, phase_basis, finite_sigma_value=None, ec_block_
     y1 = key_stats["y1"]
     # Use opposite basis q1 as phase error. Add small finite margin.
     phase_counts = max(phase_stats["C_u"], 1)
-    finite_margin = 0.2 * finite_sigma_value / np.sqrt(phase_counts)
-    q1_phase = min(0.5, phase_stats["q1"] + finite_margin)
+    q1_phase = phase_stats["q1"]
 
     # EC sample disclosure per block
     num_blocks = int(np.ceil(C_u / ec_block_value)) if C_u > 0 else 0
     sample_bits = min(C_u, num_blocks * qber_sample_value)
 
     # Paper Eq.(7)-like rate per N_u signal+basis pulses.
-    delta = finite_sigma_value * np.sqrt(max(C_u, 1)) * np.log2(max(C_u, 2))
+    delta = finite_sigma_value * np.sqrt(max(C_u,1))
     per_pulse = (
         np.exp(-MU_U) * y0
         + MU_U * np.exp(-MU_U) * y1 * (1 - h2(q1_phase))
         - Qu * f_ec * h2(QBERu)
         - delta / max(N_u, 1)
     )
-    secure_bits = int(max(0.0, per_pulse) * N_u)
+    secure_bits=int(max(0,per_pulse)*C_u)
     secure_bits = max(0, secure_bits - sample_bits)
     secure_bits = int(secure_bits * (1 - ec_fail_prob))
 

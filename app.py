@@ -273,46 +273,60 @@ def simulate_chunk(rng, size, protocol, counts):
 
 
 def simple_decoy_for_basis(c, basis):
-    # Asymptotic-style 3-intensity lower bound for y0, y1 and upper q1.
+
     Nu = max(c[f"N_u{basis}{basis}"], 1)
     Nv = max(c[f"N_v{basis}{basis}"], 1)
     Nw = max(c[f"N_w{basis}{basis}"], 1)
+
     Cu = c[f"C_u{basis}{basis}"]
     Cv = c[f"C_v{basis}{basis}"]
     Cw = c[f"C_w{basis}{basis}"]
+
     Eu = c[f"E_u{basis}{basis}"]
 
     Qu = Cu / Nu
     Qv = Cv / Nv
     Qw = Cw / Nw
+
     QBERu = Eu / max(Cu, 1)
-    y0 = max(0.0, min(1.0, Qw))
+
+    # vacuum yield
+    y0 = max(0.0, Qw)
 
     mu = MU_U
     nu = MU_V
-    denom = mu * nu - nu * nu
-    if denom <= 0:
+
+    # 3-intensity decoy lower bound
+    numerator = (
+        Qv * np.exp(nu)
+        - Qu * np.exp(mu) * (nu**2 / mu**2)
+        - ((mu**2 - nu**2) / mu**2) * y0
+    )
+
+    denominator = mu * nu - nu**2
+
+    if denominator <= 0:
         y1 = 0.0
     else:
-        y1 = (mu / denom) * (
-            Qv * np.exp(nu)
-            - Qu * np.exp(mu) * (nu * nu / (mu * mu))
-            - ((mu * mu - nu * nu) / (mu * mu)) * y0
-        )
-        y1 = max(0.0, min(1.0, y1))
+        y1 = mu / denominator * numerator
+        y1 = max(1e-9, y1)
 
-    if mu * y1 > 0:
-        q1 = (QBERu * Qu * np.exp(mu) - 0.5 * y0) / (mu * y1)
-        q1 = max(0.0, min(0.5, q1))
+    if y1 > 0:
+        e1 = (
+            QBERu * Qu * np.exp(mu)
+            - 0.5 * y0
+        ) / (mu * y1)
+
+        e1 = np.clip(e1, 0, 0.5)
     else:
-        q1 = 0.5
+        e1 = 0.5
 
     return {
         "Qu": Qu,
         "QBERu": QBERu,
         "y0": y0,
         "y1": y1,
-        "q1": q1,
+        "q1": e1,
         "N_u": Nu,
         "C_u": Cu,
     }
@@ -332,46 +346,58 @@ def calc_basis_key(c, key_basis, phase_basis, finite_sigma_value=None, ec_block_
     QBERu = key_stats["QBERu"]
     y0 = key_stats["y0"]
     y1 = key_stats["y1"]
-    # Use opposite basis q1 as phase error. Add small finite margin.
     phase_counts = max(phase_stats["C_u"], 1)
-    q1_phase = phase_stats["q1"]
+
+    finite_margin = finite_sigma_value / np.sqrt(phase_counts)
+    
+    q1_phase = min(
+        0.5,
+        phase_stats["q1"] + finite_margin
+    )
 
     # EC sample disclosure per block
     num_blocks = int(np.ceil(C_u / ec_block_value)) if C_u > 0 else 0
     sample_bits = min(C_u, num_blocks * qber_sample_value)
 
     # Paper Eq.(7)-like rate per N_u signal+basis pulses.
-    delta = finite_sigma_value * np.sqrt(max(C_u, 1))
 
-    s0 = np.exp(-MU_U) * y0 * N_u
-    s1 = MU_U * np.exp(-MU_U) * y1 * N_u
+    S0 = np.exp(-MU_U) * y0 * N_u
+    S1 = MU_U * np.exp(-MU_U) * y1 * N_u
+    
     leakEC = C_u * f_ec * h2(QBERu)
+    
+    delta = finite_sigma_value * np.sqrt(max(C_u, 1))
     
     secure_bits = max(
         0,
         int(
-            s0
-            + s1 * (1 - h2(q1_phase))
+            S0
+            + S1 * (1 - h2(q1_phase))
             - leakEC
             - delta
         )
     )
     
-    secure_bits = max(0, secure_bits - sample_bits)
-    secure_bits = int(secure_bits * (1 - ec_fail_prob))
-
+    secure_bits = max(
+        0,
+        secure_bits - sample_bits
+    )
+    
+    secure_bits = int(
+        secure_bits * (1 - ec_fail_prob)
+    )
+    
     return {
-        "basis": key_basis,
-        "N_u": N_u,
-        "C_u": C_u,
-        "QBERu": QBERu,
-        "y0": y0,
-        "y1": y1,
-        "q1_phase": q1_phase,
-        "num_blocks": num_blocks,
-        "sample_bits": sample_bits,
-        "per_pulse_rate": secure_bits / max(N_u, 1),
-        "secure_bits": secure_bits,
+    "basis": key_basis,
+    "N_u": N_u,
+    "C_u": C_u,
+    "QBERu": QBERu,
+    "y0": y0,
+    "y1": y1,
+    "q1_phase": q1_phase,
+    "num_blocks": num_blocks,
+    "sample_bits": sample_bits,
+    "secure_bits": secure_bits,
     }
 
 

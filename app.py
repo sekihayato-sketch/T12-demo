@@ -288,38 +288,45 @@ def simple_decoy_for_basis(c, basis):
     Qv = Cv / Nv
     Qw = Cw / Nw
 
-    QBERu = Eu / max(Cu, 1)
-
-    # vacuum yield
-    y0 = max(0.0, Qw)
+    Euu = Eu / max(Cu, 1)
 
     mu = MU_U
     nu = MU_V
 
-    # 3-intensity decoy lower bound
-    numerator = (
-        Qv * np.exp(nu)
-        - Qu * np.exp(mu) * (nu**2 / mu**2)
-        - ((mu**2 - nu**2) / mu**2) * y0
-    )
+    # vacuum yield
+    Y0 = max(Qw, 1e-12)
 
-    denominator = mu * nu - nu**2
+    # ---------- Single photon yield ----------
+    A = Qv * np.exp(nu)
+    B = Qu * np.exp(mu) * (nu ** 2 / mu ** 2)
+    C = ((mu ** 2 - nu ** 2) / mu ** 2) * Y0
 
-    if denominator <= 0:
-        y1 = 0.0
+    denom = mu * nu - nu ** 2
+
+    if denom <= 0:
+        Y1 = 0.0
     else:
-        y1 = mu / denominator * numerator
-        y1 = max(1e-9, y1)
+        Y1 = mu / denom * (A - B - C)
 
-    if y1 > 0:
-        e1 = (
-            QBERu * Qu * np.exp(mu)
-            - 0.5 * y0
-        ) / (mu * y1)
+    Y1 = np.clip(Y1, 1e-6, 1.0)
 
-        e1 = np.clip(e1, 0, 0.5)
-    else:
-        e1 = 0.5
+    # ---------- Single photon error ----------
+    e1 = (
+        Euu * Qu * np.exp(mu)
+        - 0.5 * Y0
+    ) / (mu * Y1)
+
+    e1 = np.clip(e1, 0.0, 0.5)
+
+    return {
+        "Qu": Qu,
+        "QBERu": Euu,
+        "y0": Y0,
+        "y1": Y1,
+        "q1": e1,
+        "N_u": Nu,
+        "C_u": Cu,
+    }
 
     return {
         "Qu": Qu,
@@ -361,12 +368,14 @@ def calc_basis_key(c, key_basis, phase_basis, finite_sigma_value=None, ec_block_
 
     # Paper Eq.(7)-like rate per N_u signal+basis pulses.
 
+    Q1 = MU_U * np.exp(-MU_U) * y1
+
+    S1 = Q1 * N_u
     S0 = np.exp(-MU_U) * y0 * N_u
-    S1 = MU_U * np.exp(-MU_U) * y1 * N_u
     
     leakEC = C_u * f_ec * h2(QBERu)
     
-    delta = finite_sigma_value * np.sqrt(max(C_u, 1))
+    delta = finite_sigma_value * np.log2(max(C_u,2))
     
     secure_bits = max(
         0,

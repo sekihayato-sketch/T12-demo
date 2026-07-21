@@ -288,54 +288,67 @@ def simple_decoy_for_basis(c, basis):
     Qv = Cv / Nv
     Qw = Cw / Nw
 
-    Euu = Eu / max(Cu, 1)
+    Eu_rate = Eu / max(Cu, 1)
 
-    mu = MU_U
-    nu = MU_V
+    μ = MU_U
+    ν = MU_V
+    ω = MU_W
 
-    # vacuum yield
-    Y0 = max(Qw, 1e-12)
+    # ---------- Eq.(2) ----------
+    Y0 = max(
+        0.0,
+        min(
+            1.0,
+            Qw * np.exp(ω)
+        )
+    )
 
-    # ---------- Single photon yield ----------
-    A = Qv * np.exp(nu)
-    B = Qu * np.exp(mu) * (nu ** 2 / mu ** 2)
-    C = ((mu ** 2 - nu ** 2) / mu ** 2) * Y0
+    # ---------- Eq.(3) ----------
+    A = (
+        Qv * np.exp(ν)
+        - (ν**2 / μ**2) * Qu * np.exp(μ)
+        - ((μ**2 - ν**2) / μ**2) * Y0
+    )
 
-    denom = mu * nu - nu ** 2
+    denom = μ * ν - ν**2
 
     if denom <= 0:
         Y1 = 0.0
     else:
-        Y1 = mu / denom * (A - B - C)
+        Y1 = μ / denom * A
+        Y1 = max(Y1, 1e-12)
 
-    Y1 = np.clip(Y1, 1e-6, 1.0)
+    # ---------- Eq.(4) ----------
+    if Y1 > 0:
 
-    # ---------- Single photon error ----------
-    e1 = (
-        Euu * Qu * np.exp(mu)
-        - 0.5 * Y0
-    ) / (mu * Y1)
+        e1 = (
+            Eu_rate * Qu * np.exp(μ)
+            - 0.5 * Y0
+        ) / (μ * Y1)
+
+    else:
+        e1 = 0.5
 
     e1 = np.clip(e1, 0.0, 0.5)
 
     return {
+
         "Qu": Qu,
-        "QBERu": Euu,
+        "Qv": Qv,
+        "Qw": Qw,
+    
+        "QBERu": Eu_rate,
+    
         "y0": Y0,
         "y1": Y1,
+    
         "q1": e1,
+    
         "N_u": Nu,
         "C_u": Cu,
-    }
-
-    return {
-        "Qu": Qu,
-        "QBERu": QBERu,
-        "y0": y0,
-        "y1": y1,
-        "q1": e1,
-        "N_u": Nu,
-        "C_u": Cu,
+    
+        "C_v": Cv,
+        "C_w": Cw,
     }
 
 
@@ -345,6 +358,13 @@ def calc_basis_key(c, key_basis, phase_basis, finite_sigma_value=None, ec_block_
     qber_sample_value = qber_sample_bits if qber_sample_value is None else qber_sample_value
 
     key_stats = simple_decoy_for_basis(c, key_basis)
+    Qu = key_stats["Qu"]
+    Qv = key_stats["Qv"]
+    Qw = key_stats["Qw"]
+    
+    Cu = key_stats["C_u"]
+    Cv = key_stats["C_v"]
+    Cw = key_stats["C_w"]
     phase_stats = simple_decoy_for_basis(c, phase_basis)
 
     N_u = key_stats["N_u"]
@@ -355,11 +375,15 @@ def calc_basis_key(c, key_basis, phase_basis, finite_sigma_value=None, ec_block_
     y1 = key_stats["y1"]
     phase_counts = max(phase_stats["C_u"], 1)
 
-    finite_margin = finite_sigma_value / np.sqrt(phase_counts)
+    # Eq.(5) finite-size fluctuation
+    delta_phase = finite_sigma_value * np.sqrt(
+        np.log(1 / EPS_TOTAL) / phase_counts
+    )
     
-    q1_phase = min(
+    q1_phase = np.clip(
+        phase_stats["q1"] + delta_phase,
+        0,
         0.5,
-        phase_stats["q1"] + finite_margin
     )
 
     # EC sample disclosure per block
@@ -370,22 +394,59 @@ def calc_basis_key(c, key_basis, phase_basis, finite_sigma_value=None, ec_block_
 
     Q1 = MU_U * np.exp(-MU_U) * y1
 
-    S1 = Q1 * N_u
+    # -------------------------------
+    # Finite-size Chernoff bounds
+    # -------------------------------
+    
+    eps = EPS_TOTAL
+    
+    def fluct(x):
+        return np.sqrt(
+            max(x, 1)
+            * np.log(1 / eps)
+            / 2
+        )
+    
+    Cu_upper = Cu + fluct(Cu)
+    Cu_lower = max(0, Cu - fluct(Cu))
+    
+    Cv_upper = Cv + fluct(Cv)
+    Cv_lower = max(0, Cv - fluct(Cv))
+    
+    Cw_upper = Cw + fluct(Cw)
+    Cw_lower = max(0, Cw - fluct(Cw))
+
     S0 = np.exp(-MU_U) * y0 * N_u
+
+    S1 = MU_U * np.exp(-MU_U) * y1 * N_u
+    
+    S0 = min(S0, Cu_upper)
+    
+    S1 = min(S1, Cu_upper - S0)
+    
+    S0 = max(S0, 0)
+    
+    S1 = max(S1, 0)
     
     leakEC = C_u * f_ec * h2(QBERu)
     
-    delta = finite_sigma_value * np.log2(max(C_u,2))
-    
-    secure_bits = max(
-        0,
-        int(
-            S0
-            + S1 * (1 - h2(q1_phase))
-            - leakEC
-            - delta
+    # Eq.(6)
+    delta = (
+        finite_sigma_value
+        * np.sqrt(
+            max(C_u, 1)
+            * np.log(1 / EPS_TOTAL)
         )
     )
+    
+    per_pulse = (
+        S0
+        + S1 * (1 - h2(q1_phase))
+        - leakEC
+        - delta
+    )
+    
+    secure_bits = int(max(0, per_pulse))
     
     secure_bits = max(
         0,

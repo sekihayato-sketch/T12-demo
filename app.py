@@ -299,7 +299,7 @@ def simple_decoy_for_basis(c, basis):
             - Qu * np.exp(mu) * (nu * nu / (mu * mu))
             - ((mu * mu - nu * nu) / (mu * mu)) * y0
         )
-        y1 = max(y0, min(1,y1))
+        y1 = max(0.0, min(1.0, y1))
 
     if mu * y1 > 0:
         q1 = (QBERu * Qu * np.exp(mu) - 0.5 * y0) / (mu * y1)
@@ -341,14 +341,22 @@ def calc_basis_key(c, key_basis, phase_basis, finite_sigma_value=None, ec_block_
     sample_bits = min(C_u, num_blocks * qber_sample_value)
 
     # Paper Eq.(7)-like rate per N_u signal+basis pulses.
-    delta = finite_sigma_value * np.sqrt(max(C_u,1))
-    per_pulse = (
-        np.exp(-MU_U) * y0
-        + MU_U * np.exp(-MU_U) * y1 * (1 - h2(q1_phase))
-        - Qu * f_ec * h2(QBERu)
-        - delta / max(N_u, 1)
+    delta = finite_sigma_value * np.sqrt(max(C_u, 1))
+
+    s0 = np.exp(-MU_U) * y0 * N_u
+    s1 = MU_U * np.exp(-MU_U) * y1 * N_u
+    leakEC = C_u * f_ec * h2(QBERu)
+    
+    secure_bits = max(
+        0,
+        int(
+            s0
+            + s1 * (1 - h2(q1_phase))
+            - leakEC
+            - delta
+        )
     )
-    secure_bits=int(max(0,per_pulse)*C_u)
+    
     secure_bits = max(0, secure_bits - sample_bits)
     secure_bits = int(secure_bits * (1 - ec_fail_prob))
 
@@ -362,7 +370,7 @@ def calc_basis_key(c, key_basis, phase_basis, finite_sigma_value=None, ec_block_
         "q1_phase": q1_phase,
         "num_blocks": num_blocks,
         "sample_bits": sample_bits,
-        "per_pulse_rate": per_pulse,
+        "per_pulse_rate": secure_bits / max(N_u, 1),
         "secure_bits": secure_bits,
     }
 

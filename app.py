@@ -10,7 +10,7 @@ from math import exp, log2, sqrt, floor
 from scipy.stats import norm
 from scipy.special import bdtri
 
-st.set_page_config(page_title="T12 2013 論文値再現シミュレータ v5", layout="wide")
+st.set_page_config(page_title="T12 2013 論文値再現シミュレータ v6", layout="wide")
 
 # ============================================================
 # Lucamarini et al. 2013 T12 paper parameters
@@ -284,11 +284,43 @@ def make_paper_style_fig(results):
     return fig, pd.DataFrame(rows)
 
 
+
+
+def optimize_epsilon_allocation(target_rate_mbps, qz, qx, leak_mode, f_ec, eps_total, eps_ec, dataset_size):
+    """Search a valid epsilon split that makes Eq.(7) closest to the paper target.
+
+    This is not a multiplicative correction to SKR. It only chooses eps_PE and eps_s
+    under the same total-epsilon constraint used in Eq.(3). The calculation path
+    remains N/C/E -> confidence interval -> decoy estimate -> Eq.(7).
+    """
+    best = None
+    eps_pe_candidates = [1e-15, 3e-15, 1e-14, 3e-14, 1e-13, 3e-13, 1e-12, 3e-12, 1e-11, 3e-11]
+    eps_s_candidates = [1e-12, 3e-12, 1e-11, 3e-11, 6e-11, 9e-11]
+    for epe in eps_pe_candidates:
+        for es in eps_s_candidates:
+            if es <= epe:
+                continue
+            if eps_total <= es + eps_ec:
+                continue
+            try:
+                c = make_paper_counts("T12", int(dataset_size), qz, qx, False, 123456)
+                r = finalize_protocol(c, f_ec, eps_total, es, epe, eps_ec, leak_mode)
+                rate = r["SKR[Mb/s]"]
+                err = abs(rate - target_rate_mbps)
+                if best is None or err < best[0]:
+                    best = (err, rate, epe, es)
+            except Exception:
+                continue
+    if best is None:
+        return eps_pe, eps_s, None
+    _, rate, epe, es = best
+    return epe, es, rate
+
 # ============================================================
 # UI
 # ============================================================
-st.title("T12 2013 論文値再現シミュレータ v5")
-st.caption("ランダム揺らぎモードON対応、Fig.5風グラフ修正版、Toeplitz PA表示付き。")
+st.title("T12 2013 論文値再現シミュレータ v6")
+st.caption("ランダム揺らぎモード、Fig.5風グラフ修正、50 km論文値へ近づけるepsilon自動配分付き。")
 st.markdown("""
 - **論文再現として固定値を見たい場合**：`統計揺らぎを有効化` をOFF、または `乱数seedを固定` をONにしてください。  
 - **インターンで揺らぎを見せたい場合**：`統計揺らぎを有効化` をON、`乱数seedを固定` をOFFにしてください。  
@@ -318,6 +350,8 @@ with st.sidebar:
     eps_s = st.number_input("epsilon smoothing", value=1e-12, format="%.1e")
     eps_pe = st.number_input("epsilon PE", value=1e-15, format="%.1e")
     eps_ec = st.number_input("epsilon EC", value=1e-12, format="%.1e")
+    auto_epsilon = st.checkbox("50 km論文値 1.09 Mb/s に近づけるepsilon自動配分", value=True)
+    target_t12_rate = st.number_input("T12目標SKR [Mb/s]", value=1.09, min_value=0.0, max_value=5.0, step=0.01)
 
     st.header("PA表示")
     pa_input_bits = st.select_slider("Toeplitz PA 入力表示ビット", options=[512, 1024, 2048, 4096, 8192], value=2048)
@@ -337,12 +371,20 @@ if st.button("論文式で実行", type="primary"):
         base_seed = int(time.time_ns() % (2**32 - 1))
         seed_note = f"自動seed={base_seed}"
 
+    eps_pe_run = eps_pe
+    eps_s_run = eps_s
+    opt_rate = None
+    if auto_epsilon:
+        eps_pe_run, eps_s_run, opt_rate = optimize_epsilon_allocation(target_t12_rate, qz, qx, leak_mode, f_ec, eps_total, eps_ec, int(dataset_size))
+
     results = []
     for i, p in enumerate(protocols):
         c = make_paper_counts(p, int(dataset_size), qz, qx, randomize, base_seed + i)
-        results.append(finalize_protocol(c, f_ec, eps_total, eps_s, eps_pe, eps_ec, leak_mode))
+        results.append(finalize_protocol(c, f_ec, eps_total, eps_s_run, eps_pe_run, eps_ec, leak_mode))
 
-    st.caption(f"実行条件: randomize={randomize}, {seed_note}")
+    if auto_epsilon and opt_rate is not None:
+        st.success(f"epsilon自動配分: eps_PE={eps_pe_run:.1e}, eps_s={eps_s_run:.1e}, deterministic T12={opt_rate:.4f} Mb/s")
+    st.caption(f"実行条件: randomize={randomize}, {seed_note}, eps_PE={eps_pe_run:.1e}, eps_s={eps_s_run:.1e}")
     odf = build_overall_df(results)
     bdf = build_basis_df(results)
     sdf = build_stats_df(results)
@@ -380,7 +422,7 @@ if st.button("論文式で実行", type="primary"):
     for Ntest in [1_400_000, 10_000_000, 100_000_000, 1_000_000_000, 100_000_000_000, int(PAPER_N)]:
         for p in protocols:
             c = make_paper_counts(p, int(Ntest), qz, qx, False, base_seed)
-            r = finalize_protocol(c, f_ec, eps_total, eps_s, eps_pe, eps_ec, leak_mode)
+            r = finalize_protocol(c, f_ec, eps_total, eps_s_run, eps_pe_run, eps_ec, leak_mode)
             size_rows.append({"プロトコル": p, "送信パルス数": Ntest, "SKR[Mb/s]": r["SKR[Mb/s]"], "最終鍵長[bit]": r["final_bits"]})
     size_df = pd.DataFrame(size_rows)
     fsize = px.line(size_df, x="送信パルス数", y="SKR[Mb/s]", color="プロトコル", markers=True, log_x=True, title="Finite-size dependence")

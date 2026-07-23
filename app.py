@@ -2,26 +2,23 @@ import streamlit as st
 import numpy as np
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import hashlib
-from math import exp, log2, sqrt, floor, log10
-
-# SciPy is required for robust high-quantile normal values.
-# Exact beta-PPF Clopper-Pearson is intentionally NOT used for 1e12-scale n,
-# because scipy.stats.beta.ppf can numerically collapse to 1.0 for huge alpha/beta.
+import time
+from math import exp, log2, sqrt, floor
 from scipy.stats import norm
 from scipy.special import bdtri
 
-st.set_page_config(page_title="T12 2013 Paper Exact Reproduction v4", layout="wide")
+st.set_page_config(page_title="T12 2013 論文値再現シミュレータ v5", layout="wide")
 
 # ============================================================
-# Lucamarini et al. 2013, Optics Express 21, 24550-24565
-# Efficient decoy-state quantum key distribution with quantified security
+# Lucamarini et al. 2013 T12 paper parameters
 # ============================================================
 PULSE_RATE_HZ = 1_000_000_000
 PAPER_SESSION_SECONDS = 20 * 60
 PAPER_N = PULSE_RATE_HZ * PAPER_SESSION_SECONDS
 
-# T12 parameters explicitly stated in the paper
 MU_U = 0.425
 MU_V = 0.044
 MU_W = 0.001
@@ -32,11 +29,9 @@ P_X_T12 = 1 / 16
 P_Z_T12 = 15 / 16
 EPS_TOTAL = 1e-10
 
-MUS = {"u": MU_U, "v": MU_V, "w": MU_W}
 P_INT = {"u": P_U, "v": P_V, "w": P_W}
 
-# Paper 50 km, 20 min measured sifted counts, Fig.3 text/table area.
-# These are NOT fitted coefficients. They are the directly reported experimental counts.
+# 50 km, 20 min, paper-reported sifted/non-empty counts used in the reproduction mode.
 PAPER_50KM_COUNTS = {
     ("u", "Z"): 5.016e9,
     ("u", "X"): 2.231e7,
@@ -60,23 +55,11 @@ def h2(q: float) -> float:
     return -q * log2(q) - (1 - q) * log2(1 - q)
 
 
-def fmt_si(x, suffix=""):
-    x = float(x)
-    sign = "-" if x < 0 else ""
-    x = abs(x)
-    for s, u in [(1e12, "T"), (1e9, "G"), (1e6, "M"), (1e3, "k")]:
-        if x >= s:
-            return f"{sign}{x/s:.3f}{u}{suffix}"
-    return f"{sign}{x:.3f}{suffix}"
-
-
 def robust_binomial_interval(k: int, n: int, alpha: float):
-    """Clopper-Pearson interval with numerical-stability guard.
+    """Numerically stable Clopper-Pearson with Wilson fallback.
 
-    The paper uses Clopper-Pearson confidence intervals. For paper-scale n,
-    beta.ppf can return 1.0 due to numerical collapse, so this implementation
-    uses scipy.special.bdtri, which is equivalent to CP inversion of the binomial
-    CDF. If bdtri fails, it falls back to Wilson only as a diagnostic guard.
+    beta.ppf and bdtri can fail for the paper-scale counts. If bdtri returns NaN,
+    hi=1 for non-saturated data, or lo=0 for nonzero counts, use Wilson fallback.
     """
     if n <= 0:
         return 0.0, 1.0
@@ -85,9 +68,6 @@ def robust_binomial_interval(k: int, n: int, alpha: float):
     try:
         lo = 0.0 if k == 0 else float(bdtri(k - 1, n, 1 - a))
         hi = 1.0 if k == n else float(bdtri(k, n, a))
-        # bdtri can silently underflow to 0.0 for the lower bound when k is small
-        # but nonzero, especially for X-basis decoy counts. That creates y1=0 and
-        # q1_phase=50%. Treat that as numerical failure and fall back to Wilson.
         if (np.isfinite(lo) and np.isfinite(hi)
                 and 0 <= lo <= hi <= 1
                 and not (hi == 1.0 and k < n)
@@ -95,6 +75,7 @@ def robust_binomial_interval(k: int, n: int, alpha: float):
             return lo, hi
     except Exception:
         pass
+
     p = k / n
     z = float(norm.isf(a))
     denom = 1 + z * z / n
@@ -104,34 +85,27 @@ def robust_binomial_interval(k: int, n: int, alpha: float):
 
 
 def make_paper_counts(protocol: str, n_total: int, qz: float, qx: float, randomize: bool, seed: int):
-    """Generate N/C/E tables from paper-measured 50 km yields.
-
-    For T12 at N=1.2e12, this reproduces the paper's reported measured counts.
-    For other N, it uses the same empirical yields and changes only the session length.
-    For BB84, it uses the same optical yields but pX=pZ=1/2.
-    This is not coefficient-fitting to match SKR; it is yield-based reconstruction.
-    """
     rng = np.random.default_rng(seed)
     px = P_X_T12 if protocol == "T12" else 0.5
     pz = 1 - px
-    counts = {"protocol": protocol, "N_total": int(n_total), "pX": px, "pZ": pz}
+    counts = {"protocol": protocol, "N_total": int(n_total), "pX": px, "pZ": pz, "seed": seed}
+
     for lab in ["u", "v", "w"]:
         for basis, pb, pb_ref in [("Z", pz, P_Z_T12), ("X", px, P_X_T12)]:
             N = n_total * P_INT[lab] * pb * pb
             N_ref = PAPER_N * P_INT[lab] * pb_ref * pb_ref
             yield_ref = PAPER_50KM_COUNTS[(lab, basis)] / N_ref
             mean_C = N * yield_ref
-            C = rng.poisson(mean_C) if randomize else int(round(mean_C))
+            C = int(rng.poisson(mean_C)) if randomize else int(round(mean_C))
             q = qz if basis == "Z" else qx
-            E = rng.binomial(C, q) if randomize else int(round(C * q))
+            E = int(rng.binomial(C, q)) if randomize else int(round(C * q))
             counts[("N", lab, basis)] = int(round(N))
-            counts[("C", lab, basis)] = int(C)
-            counts[("E", lab, basis)] = int(E)
+            counts[("C", lab, basis)] = C
+            counts[("E", lab, basis)] = E
     return counts
 
 
 def decoy_bounds_basis(counts, basis: str, eps_pe: float):
-    """3-intensity decoy lower bounds for y0 and y1, using bounded observed yields."""
     bounds = {}
     for lab in ["u", "v", "w"]:
         N = counts[("N", lab, basis)]
@@ -143,22 +117,18 @@ def decoy_bounds_basis(counts, basis: str, eps_pe: float):
     Yv_l, Yv_u = bounds["v"]
     Yw_l, Yw_u = bounds["w"]
 
-    # Vacuum lower bound from v/w.
     y0_l = (v * Yw_l * exp(w) - w * Yv_u * exp(v)) / max(v - w, 1e-30)
     y0_l = min(max(y0_l, 0.0), 1.0)
 
-    # Single-photon lower bound using u/v/w, finite statistics worst case.
     coeff = (v * v - w * w) / (u * u)
     denom = u * (v - w) - (v * v - w * w)
     bracket = Yv_l * exp(v) - Yw_u * exp(w) - coeff * (Yu_u * exp(u) - y0_l)
     y1_l = u / max(denom, 1e-30) * bracket
     y1_l = min(max(y1_l, 1e-15), 1.0)
-
     return y0_l, y1_l, bounds
 
 
 def delta_term(n_raw: float, eps_total: float, eps_s: float, eps_pe: float, eps_ec: float):
-    # Paper Eq.(3)-style finite-size term as written in the article text.
     if eps_s <= eps_pe or eps_total <= eps_s + eps_ec:
         return np.inf
     return 7 * sqrt(max(n_raw, 1.0) * log2(2 / (eps_s - eps_pe))) + 2 * log2(1 / (2 * (eps_total - eps_s - eps_ec)))
@@ -166,12 +136,11 @@ def delta_term(n_raw: float, eps_total: float, eps_s: float, eps_pe: float, eps_
 
 def secure_basis(counts, key_basis: str, phase_basis: str, f_ec: float, eps_total: float, eps_s: float, eps_pe: float, eps_ec: float, leak_mode: str):
     y0_key, y1_key, y_bounds = decoy_bounds_basis(counts, key_basis, eps_pe)
-    y0_phase, y1_phase, phase_bounds = decoy_bounds_basis(counts, phase_basis, eps_pe)
+    y0_phase, y1_phase, _ = decoy_bounds_basis(counts, phase_basis, eps_pe)
 
-    N_phase_u = counts[("N", "u", phase_basis)]
-    E_phase_u = counts[("E", "u", phase_basis)]
-    B_phase_hi = robust_binomial_interval(E_phase_u, N_phase_u, eps_pe / 16)[1]
-
+    N_phase = counts[("N", "u", phase_basis)]
+    E_phase = counts[("E", "u", phase_basis)]
+    B_phase_hi = robust_binomial_interval(E_phase, N_phase, eps_pe / 16)[1]
     q1_phase = (B_phase_hi - 0.5 * exp(-MU_U) * y0_phase) / max(exp(-MU_U) * MU_U * y1_phase, 1e-30)
     q1_phase = min(max(q1_phase, 0.0), 0.5)
 
@@ -182,12 +151,8 @@ def secure_basis(counts, key_basis: str, phase_basis: str, f_ec: float, eps_tota
 
     S0 = Nu * exp(-MU_U) * y0_key
     S1 = Nu * exp(-MU_U) * MU_U * y1_key
-
-    if leak_mode == "Shannon limit fEC=1.00":
-        leak = Cu * 1.00 * h2(Q)
-    else:
-        leak = Cu * f_ec * h2(Q)
-
+    leak_factor = 1.0 if leak_mode == "Shannon limit fEC=1.00" else f_ec
+    leak = Cu * leak_factor * h2(Q)
     Delta = delta_term(Cu, eps_total, eps_s, eps_pe, eps_ec)
     L = floor(max(0.0, S0 + S1 * (1 - h2(q1_phase)) - leak - Delta))
     return {
@@ -205,12 +170,9 @@ def secure_basis(counts, key_basis: str, phase_basis: str, f_ec: float, eps_tota
         "Delta[bit]": Delta,
         "secure_bits": int(L),
         "SKR[Mb/s]": PULSE_RATE_HZ * L / counts["N_total"] / 1e6,
-        "Y_u_lower": y_bounds["u"][0],
-        "Y_u_upper": y_bounds["u"][1],
-        "Y_v_lower": y_bounds["v"][0],
-        "Y_v_upper": y_bounds["v"][1],
-        "Y_w_lower": y_bounds["w"][0],
-        "Y_w_upper": y_bounds["w"][1],
+        "Y_u_lower": y_bounds["u"][0], "Y_u_upper": y_bounds["u"][1],
+        "Y_v_lower": y_bounds["v"][0], "Y_v_upper": y_bounds["v"][1],
+        "Y_w_lower": y_bounds["w"][0], "Y_w_upper": y_bounds["w"][1],
     }
 
 
@@ -221,6 +183,7 @@ def finalize_protocol(counts, f_ec, eps_total, eps_s, eps_pe, eps_ec, leak_mode)
     return {
         "Protocol": counts["protocol"],
         "N_total": counts["N_total"],
+        "seed": counts.get("seed", None),
         "signal_u_sifted": counts[("C", "u", "Z")] + counts[("C", "u", "X")],
         "final_bits": total,
         "SKR[Mb/s]": PULSE_RATE_HZ * total / counts["N_total"] / 1e6,
@@ -242,28 +205,28 @@ def deterministic_bits(n_bits: int, seed: str):
 
 
 def toeplitz_hash(raw_bits: str, out_len: int, seed: int):
-    """Actual Toeplitz universal hashing for the displayed block."""
     out_len = int(max(1, out_len))
     x = np.fromiter((1 if c == "1" else 0 for c in raw_bits), dtype=np.uint8)
     rng = np.random.default_rng(seed)
     toeplitz_seed = rng.integers(0, 2, size=len(x) + out_len - 1, dtype=np.uint8)
     out = np.empty(out_len, dtype=np.uint8)
     for i in range(out_len):
-        out[i] = np.bitwise_xor.reduce(x & toeplitz_seed[i:i+len(x)])
+        out[i] = np.bitwise_xor.reduce(x & toeplitz_seed[i:i + len(x)])
     return "".join("1" if b else "0" for b in out)
 
 
-def overall_df(results):
+def build_overall_df(results):
     return pd.DataFrame([{
         "プロトコル": r["Protocol"],
         "送信パルス数": r["N_total"],
+        "seed": r["seed"],
         "信号u sifted counts": r["signal_u_sifted"],
         "最終鍵長[bit]": r["final_bits"],
         "SKR[Mb/s]": r["SKR[Mb/s]"],
     } for r in results])
 
 
-def basis_df(results):
+def build_basis_df(results):
     rows = []
     for r in results:
         for b in ["Z", "X"]:
@@ -271,7 +234,7 @@ def basis_df(results):
     return pd.DataFrame(rows)
 
 
-def stats_df(results):
+def build_stats_df(results):
     rows = []
     for r in results:
         c = r["counts"]
@@ -289,14 +252,47 @@ def stats_df(results):
     return pd.DataFrame(rows)
 
 
-st.title("T12 2013 論文値再現シミュレータ v4")
-st.caption("係数合わせなし。論文の50 km実測カウントから、有限サイズデコイ推定→Eq.(7)→Toeplitz PA表示まで通し、Fig.5風のX/Z/Total寄与グラフも表示します。")
+def make_paper_style_fig(results):
+    # Fixed, no MultiIndex x. Two subplots emulate paper Fig.5 layout without NaN or collapsed axes.
+    fig = make_subplots(
+        rows=1, cols=2,
+        subplot_titles=("p_x = 1/16", "p_x = 1/2"),
+        shared_yaxes=True,
+        horizontal_spacing=0.08,
+    )
+    t12 = next((r for r in results if r["Protocol"] == "T12"), None)
+    bb84 = next((r for r in results if r["Protocol"] == "BB84"), None)
+    rows = []
+    if t12 is not None:
+        t12_items = [("X", t12["X"]["SKR[Mb/s]"]), ("Z", t12["Z"]["SKR[Mb/s]"]), ("Total", t12["SKR[Mb/s]"])]
+        rows += [{"panel": "p_x = 1/16", "item": k, "SKR[Mb/s]": v} for k, v in t12_items]
+        fig.add_trace(go.Bar(x=[k for k, _ in t12_items], y=[v for _, v in t12_items], marker_color=["#ff9aa2", "#ff6b6b", "#ff4d57"], text=[f"{v:.3f}" for _, v in t12_items], textposition="outside", name="T12"), row=1, col=1)
+    if bb84 is not None:
+        bb_items = [("Total", bb84["SKR[Mb/s]"]), ("Z", bb84["Z"]["SKR[Mb/s]"]), ("X", bb84["X"]["SKR[Mb/s]"])]
+        rows += [{"panel": "p_x = 1/2", "item": k, "SKR[Mb/s]": v} for k, v in bb_items]
+        fig.add_trace(go.Bar(x=[k for k, _ in bb_items], y=[v for _, v in bb_items], marker_color=["#243f6b", "#5274ad", "#5d7fb8"], text=[f"{v:.3f}" for _, v in bb_items], textposition="outside", name="BB84"), row=1, col=2)
 
+    ymax = 1.2
+    if rows:
+        ymax = max(1.2, max(r["SKR[Mb/s]"] for r in rows) * 1.18)
+    fig.update_yaxes(title_text="Secure key rate [Mb/s]", range=[0, ymax], row=1, col=1)
+    fig.update_xaxes(title_text="", row=1, col=1)
+    fig.update_xaxes(title_text="", row=1, col=2)
+    fig.update_layout(title="Paper Fig.5 style: basis contribution", height=540, bargap=0.18, showlegend=False)
+    fig.add_hline(y=1.09, line_dash="dot", line_color="#ff4d57", annotation_text="T12 paper 1.09", row=1, col=1)
+    fig.add_hline(y=0.63, line_dash="dot", line_color="#243f6b", annotation_text="BB84 paper 0.63", row=1, col=2)
+    return fig, pd.DataFrame(rows)
+
+
+# ============================================================
+# UI
+# ============================================================
+st.title("T12 2013 論文値再現シミュレータ v5")
+st.caption("ランダム揺らぎモードON対応、Fig.5風グラフ修正版、Toeplitz PA表示付き。")
 st.markdown("""
-今回のv2では、前回の **論文値モードで0になる原因** を潰しています。  
-原因は、`beta.ppf` によるClopper-Pearson実装が、`n ≈ 10^12` 規模で上限を `1.0` と返す数値破綻を起こし、
-その結果 `q1_phase = 50%` まで悪化して、Eq.(7)の単一光子項が消えていたことです。  
-この版では、bdtriがNaN/0過小評価/1過大評価になった場合にWilson型信頼区間へフォールバックし、論文と同じ流れで鍵長を出します。
+- **論文再現として固定値を見たい場合**：`統計揺らぎを有効化` をOFF、または `乱数seedを固定` をONにしてください。  
+- **インターンで揺らぎを見せたい場合**：`統計揺らぎを有効化` をON、`乱数seedを固定` をOFFにしてください。  
+- 送信パルス数が `1.2e12` だと揺らぎは非常に小さいので、見せるなら `1.4e6〜1e8` も試してください。
 """)
 
 with st.sidebar:
@@ -307,8 +303,9 @@ with st.sidebar:
         options=[1_400_000, 10_000_000, 100_000_000, 1_000_000_000, 100_000_000_000, int(PAPER_N)],
         value=int(PAPER_N),
     )
-    randomize = st.checkbox("統計揺らぎをサンプリング", value=False)
-    seed = st.number_input("乱数seed", min_value=0, value=2013, step=1)
+    randomize = st.checkbox("統計揺らぎを有効化 / ランダムモード", value=True)
+    fixed_seed = st.checkbox("乱数seedを固定する", value=False)
+    seed = st.number_input("固定seed", min_value=0, value=2013, step=1, disabled=not fixed_seed)
 
     st.header("50 km論文値")
     qz = st.slider("Z基底 signal QBER [%]", 0.0, 15.0, PAPER_50KM_QBER["Z"] * 100, 0.01) / 100
@@ -333,77 +330,46 @@ if st.button("論文式で実行", type="primary"):
     if protocol_mode in ["比較表示", "BB84のみ"]:
         protocols.append("BB84")
 
+    if fixed_seed:
+        base_seed = int(seed)
+        seed_note = f"固定seed={base_seed}"
+    else:
+        base_seed = int(time.time_ns() % (2**32 - 1))
+        seed_note = f"自動seed={base_seed}"
+
     results = []
     for i, p in enumerate(protocols):
-        c = make_paper_counts(p, int(dataset_size), qz, qx, randomize, int(seed) + i)
+        c = make_paper_counts(p, int(dataset_size), qz, qx, randomize, base_seed + i)
         results.append(finalize_protocol(c, f_ec, eps_total, eps_s, eps_pe, eps_ec, leak_mode))
 
-    odf = overall_df(results)
-    bdf = basis_df(results)
-    sdf = stats_df(results)
+    st.caption(f"実行条件: randomize={randomize}, {seed_note}")
+    odf = build_overall_df(results)
+    bdf = build_basis_df(results)
+    sdf = build_stats_df(results)
 
     st.subheader("1. 全体結果")
     st.dataframe(odf, use_container_width=True)
     fig = px.bar(odf, x="プロトコル", y="SKR[Mb/s]", text="SKR[Mb/s]", title="Secure key rate from Eq.(7)")
-    fig.update_traces(texttemplate="%{y:.3f} Mb/s", textposition="outside")
+    fig.update_traces(texttemplate="%{y:.4f} Mb/s", textposition="outside")
     st.plotly_chart(fig, use_container_width=True)
 
     st.subheader("2. 基底別のEq.(7)分解")
-    show_cols = ["プロトコル", "basis", "C_u", "QBER[%]", "y0_lower", "y1_lower", "q1_phase_upper[%]", "S0[bit]", "S1[bit]", "leakEC[bit]", "Delta[bit]", "secure_bits", "SKR[Mb/s]"]
-    st.dataframe(bdf[show_cols], use_container_width=True)
-    fig2 = px.bar(bdf, x="プロトコル", y="secure_bits", color="basis", barmode="group", text="secure_bits", title="Z/X basis key contribution")
-    st.plotly_chart(fig2, use_container_width=True)
+    cols = ["プロトコル", "basis", "C_u", "QBER[%]", "y0_lower", "y1_lower", "q1_phase_upper[%]", "S0[bit]", "S1[bit]", "leakEC[bit]", "Delta[bit]", "secure_bits", "SKR[Mb/s]"]
+    st.dataframe(bdf[cols], use_container_width=True)
 
-    st.subheader("2.5 論文Fig.5風：X/Z/Total寄与グラフ")
-    fig5_rows = []
-    for r in results:
-        z_rate = r["Z"]["SKR[Mb/s]"]
-        x_rate = r["X"]["SKR[Mb/s]"]
-        total_rate = r["SKR[Mb/s]"]
-        if r["Protocol"] == "T12":
-            group = "p_x = 1/16"
-            order = [("X", x_rate), ("Z", z_rate), ("Total", total_rate)]
-            base_color = "T12"
-        else:
-            group = "p_x = 1/2"
-            order = [("Total", total_rate), ("Z", z_rate), ("X", x_rate)]
-            base_color = "BB84"
-        for item, val in order:
-            fig5_rows.append({"group": group, "item": item, "Secure key rate [Mb/s]": val, "series": base_color})
-    fig5_df = pd.DataFrame(fig5_rows)
-    color_map = {"T12": "#ff595e", "BB84": "#22406f"}
-    fig5 = px.bar(
-        fig5_df,
-        x=[fig5_df["group"], fig5_df["item"]],
-        y="Secure key rate [Mb/s]",
-        color="series",
-        text="Secure key rate [Mb/s]",
-        color_discrete_map=color_map,
-        title="Paper-style basis contribution: p_x = 1/16 vs p_x = 1/2",
-    )
-    fig5.update_traces(texttemplate="%{y:.3f}", textposition="outside", cliponaxis=False)
-    fig5.update_layout(
-        xaxis_title="",
-        yaxis_title="Secure key rate [Mb/s]",
-        bargap=0.15,
-        height=520,
-        yaxis=dict(range=[0, max(1.2, float(fig5_df["Secure key rate [Mb/s]"].max()) * 1.15)]),
-        legend_title="",
-    )
-    fig5.add_hline(y=1.09, line_dash="dot", line_color="#ff595e", annotation_text="T12 paper 1.09")
-    fig5.add_hline(y=0.63, line_dash="dot", line_color="#22406f", annotation_text="BB84 paper 0.63")
+    st.subheader("2.5 論文Fig.5風：X/Z/Total寄与グラフ 修正版")
+    fig5, fig5_df = make_paper_style_fig(results)
     st.plotly_chart(fig5, use_container_width=True)
     st.dataframe(fig5_df, use_container_width=True)
 
     st.subheader("3. 信頼区間診断")
     ci_cols = ["プロトコル", "basis", "Y_u_lower", "Y_u_upper", "Y_v_lower", "Y_v_upper", "Y_w_lower", "Y_w_upper"]
     st.dataframe(bdf[ci_cols], use_container_width=True)
-    st.caption("ここで Y_*_upper が 1.0、または Y_*_lower が非ゼロカウントなのに0.0になる場合は統計計算が壊れています。v3ではその場合にWilsonへフォールバックします。")
 
     st.subheader("4. 実験統計 N/C/E")
     st.dataframe(sdf, use_container_width=True)
 
-    st.subheader("5. 論文のFig.4風グラフ")
+    st.subheader("5. 論文Fig.4風：距離 vs SKR")
     bench_long = BENCHMARKS.melt(id_vars="距離[km]", value_vars=["T12 SKR[Mb/s]", "BB84 SKR[Mb/s]"], var_name="系列", value_name="SKR[Mb/s]")
     f4 = px.line(bench_long, x="距離[km]", y="SKR[Mb/s]", color="系列", markers=True, title="Paper benchmark: secure key rate vs distance")
     st.plotly_chart(f4, use_container_width=True)
@@ -413,12 +379,12 @@ if st.button("論文式で実行", type="primary"):
     size_rows = []
     for Ntest in [1_400_000, 10_000_000, 100_000_000, 1_000_000_000, 100_000_000_000, int(PAPER_N)]:
         for p in protocols:
-            c = make_paper_counts(p, int(Ntest), qz, qx, False, int(seed))
+            c = make_paper_counts(p, int(Ntest), qz, qx, False, base_seed)
             r = finalize_protocol(c, f_ec, eps_total, eps_s, eps_pe, eps_ec, leak_mode)
             size_rows.append({"プロトコル": p, "送信パルス数": Ntest, "SKR[Mb/s]": r["SKR[Mb/s]"], "最終鍵長[bit]": r["final_bits"]})
     size_df = pd.DataFrame(size_rows)
-    f5 = px.line(size_df, x="送信パルス数", y="SKR[Mb/s]", color="プロトコル", markers=True, log_x=True, title="Finite-size dependence")
-    st.plotly_chart(f5, use_container_width=True)
+    fsize = px.line(size_df, x="送信パルス数", y="SKR[Mb/s]", color="プロトコル", markers=True, log_x=True, title="Finite-size dependence")
+    st.plotly_chart(fsize, use_container_width=True)
     st.dataframe(size_df, use_container_width=True)
 
     st.subheader("7. Toeplitz privacy amplification")
@@ -429,10 +395,10 @@ if st.button("論文式で実行", type="primary"):
                 continue
             raw_len = min(pa_input_bits, r["signal_u_sifted"], 8192)
             out_len = min(pa_output_bits, r["final_bits"], 1024)
-            raw = deterministic_bits(int(raw_len), f"{r['Protocol']}-{seed}-{r['final_bits']}")
-            pa = toeplitz_hash(raw, int(out_len), int(seed) + len(r["Protocol"]))
+            raw = deterministic_bits(int(raw_len), f"{r['Protocol']}-{base_seed}-{r['final_bits']}")
+            pa = toeplitz_hash(raw, int(out_len), base_seed + len(r["Protocol"]))
             st.write(f"表示用の実PA: raw {raw_len:,} bit → PA {out_len:,} bit。最終鍵長そのものは Eq.(7) の {r['final_bits']:,} bit です。")
             st.code(raw[:1024], language="text")
             st.code(pa, language="text")
 else:
-    st.info("左の条件を設定して、［論文式で実行］を押してください。デフォルトは 50 km・20分・T12論文値です。")
+    st.info("左の条件を設定して、［論文式で実行］を押してください。ランダムモードはデフォルトONです。")

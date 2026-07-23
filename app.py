@@ -11,7 +11,7 @@ from math import exp, log2, sqrt, floor, log10
 from scipy.stats import norm
 from scipy.special import bdtri
 
-st.set_page_config(page_title="T12 2013 Paper Exact Reproduction v3", layout="wide")
+st.set_page_config(page_title="T12 2013 Paper Exact Reproduction v4", layout="wide")
 
 # ============================================================
 # Lucamarini et al. 2013, Optics Express 21, 24550-24565
@@ -289,8 +289,8 @@ def stats_df(results):
     return pd.DataFrame(rows)
 
 
-st.title("T12 2013 論文値再現シミュレータ v3")
-st.caption("係数合わせなし。論文の50 km実測カウントから、有限サイズデコイ推定→Eq.(7)→Toeplitz PA表示まで通します。")
+st.title("T12 2013 論文値再現シミュレータ v4")
+st.caption("係数合わせなし。論文の50 km実測カウントから、有限サイズデコイ推定→Eq.(7)→Toeplitz PA表示まで通し、Fig.5風のX/Z/Total寄与グラフも表示します。")
 
 st.markdown("""
 今回のv2では、前回の **論文値モードで0になる原因** を潰しています。  
@@ -353,6 +353,47 @@ if st.button("論文式で実行", type="primary"):
     st.dataframe(bdf[show_cols], use_container_width=True)
     fig2 = px.bar(bdf, x="プロトコル", y="secure_bits", color="basis", barmode="group", text="secure_bits", title="Z/X basis key contribution")
     st.plotly_chart(fig2, use_container_width=True)
+
+    st.subheader("2.5 論文Fig.5風：X/Z/Total寄与グラフ")
+    fig5_rows = []
+    for r in results:
+        z_rate = r["Z"]["SKR[Mb/s]"]
+        x_rate = r["X"]["SKR[Mb/s]"]
+        total_rate = r["SKR[Mb/s]"]
+        if r["Protocol"] == "T12":
+            group = "p_x = 1/16"
+            order = [("X", x_rate), ("Z", z_rate), ("Total", total_rate)]
+            base_color = "T12"
+        else:
+            group = "p_x = 1/2"
+            order = [("Total", total_rate), ("Z", z_rate), ("X", x_rate)]
+            base_color = "BB84"
+        for item, val in order:
+            fig5_rows.append({"group": group, "item": item, "Secure key rate [Mb/s]": val, "series": base_color})
+    fig5_df = pd.DataFrame(fig5_rows)
+    color_map = {"T12": "#ff595e", "BB84": "#22406f"}
+    fig5 = px.bar(
+        fig5_df,
+        x=[fig5_df["group"], fig5_df["item"]],
+        y="Secure key rate [Mb/s]",
+        color="series",
+        text="Secure key rate [Mb/s]",
+        color_discrete_map=color_map,
+        title="Paper-style basis contribution: p_x = 1/16 vs p_x = 1/2",
+    )
+    fig5.update_traces(texttemplate="%{y:.3f}", textposition="outside", cliponaxis=False)
+    fig5.update_layout(
+        xaxis_title="",
+        yaxis_title="Secure key rate [Mb/s]",
+        bargap=0.15,
+        height=520,
+        yaxis=dict(range=[0, max(1.2, float(fig5_df["Secure key rate [Mb/s]"].max()) * 1.15)]),
+        legend_title="",
+    )
+    fig5.add_hline(y=1.09, line_dash="dot", line_color="#ff595e", annotation_text="T12 paper 1.09")
+    fig5.add_hline(y=0.63, line_dash="dot", line_color="#22406f", annotation_text="BB84 paper 0.63")
+    st.plotly_chart(fig5, use_container_width=True)
+    st.dataframe(fig5_df, use_container_width=True)
 
     st.subheader("3. 信頼区間診断")
     ci_cols = ["プロトコル", "basis", "Y_u_lower", "Y_u_upper", "Y_v_lower", "Y_v_upper", "Y_w_lower", "Y_w_upper"]

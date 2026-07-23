@@ -11,7 +11,7 @@ from math import exp, log2, sqrt, floor, log10
 from scipy.stats import norm
 from scipy.special import bdtri
 
-st.set_page_config(page_title="T12 2013 Paper Exact Reproduction v2", layout="wide")
+st.set_page_config(page_title="T12 2013 Paper Exact Reproduction v3", layout="wide")
 
 # ============================================================
 # Lucamarini et al. 2013, Optics Express 21, 24550-24565
@@ -85,7 +85,13 @@ def robust_binomial_interval(k: int, n: int, alpha: float):
     try:
         lo = 0.0 if k == 0 else float(bdtri(k - 1, n, 1 - a))
         hi = 1.0 if k == n else float(bdtri(k, n, a))
-        if np.isfinite(lo) and np.isfinite(hi) and 0 <= lo <= hi <= 1 and not (hi == 1.0 and k < n):
+        # bdtri can silently underflow to 0.0 for the lower bound when k is small
+        # but nonzero, especially for X-basis decoy counts. That creates y1=0 and
+        # q1_phase=50%. Treat that as numerical failure and fall back to Wilson.
+        if (np.isfinite(lo) and np.isfinite(hi)
+                and 0 <= lo <= hi <= 1
+                and not (hi == 1.0 and k < n)
+                and not (lo == 0.0 and k > 0)):
             return lo, hi
     except Exception:
         pass
@@ -283,14 +289,14 @@ def stats_df(results):
     return pd.DataFrame(rows)
 
 
-st.title("T12 2013 論文値再現シミュレータ v2")
+st.title("T12 2013 論文値再現シミュレータ v3")
 st.caption("係数合わせなし。論文の50 km実測カウントから、有限サイズデコイ推定→Eq.(7)→Toeplitz PA表示まで通します。")
 
 st.markdown("""
 今回のv2では、前回の **論文値モードで0になる原因** を潰しています。  
 原因は、`beta.ppf` によるClopper-Pearson実装が、`n ≈ 10^12` 規模で上限を `1.0` と返す数値破綻を起こし、
 その結果 `q1_phase = 50%` まで悪化して、Eq.(7)の単一光子項が消えていたことです。  
-この版では、巨大サンプルに対して数値安定なWilson型信頼区間を使い、論文と同じ流れで鍵長を出します。
+この版では、bdtriがNaN/0過小評価/1過大評価になった場合にWilson型信頼区間へフォールバックし、論文と同じ流れで鍵長を出します。
 """)
 
 with st.sidebar:
@@ -351,7 +357,7 @@ if st.button("論文式で実行", type="primary"):
     st.subheader("3. 信頼区間診断")
     ci_cols = ["プロトコル", "basis", "Y_u_lower", "Y_u_upper", "Y_v_lower", "Y_v_upper", "Y_w_lower", "Y_w_upper"]
     st.dataframe(bdf[ci_cols], use_container_width=True)
-    st.caption("ここで Y_u_upper が 1.0 になる場合は統計計算が壊れています。v2ではここが小さい値に戻るよう修正しています。")
+    st.caption("ここで Y_*_upper が 1.0、または Y_*_lower が非ゼロカウントなのに0.0になる場合は統計計算が壊れています。v3ではその場合にWilsonへフォールバックします。")
 
     st.subheader("4. 実験統計 N/C/E")
     st.dataframe(sdf, use_container_width=True)

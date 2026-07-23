@@ -10,7 +10,7 @@ from math import exp, factorial, log2, sqrt, floor
 from scipy.stats import norm
 from scipy.optimize import linprog
 
-st.set_page_config(page_title="T12 2013 論文値再現シミュレータ v8 LP", layout="wide")
+st.set_page_config(page_title="T12 2013 論文値再現シミュレータ v9 Eve", layout="wide")
 
 # ============================================================
 # Lucamarini et al. 2013 T12 paper parameters
@@ -77,6 +77,38 @@ def stable_binomial_interval(k: int, n: int, alpha: float):
 def poisson_weights(mu: float, kmax: int):
     return np.array([exp(-mu) * mu**k / factorial(k) for k in range(kmax + 1)], dtype=float)
 
+
+
+def combine_independent_errors(q_base: float, q_extra: float):
+    """Combine two independent binary error mechanisms by XOR probability."""
+    q_base = min(max(float(q_base), 0.0), 0.5)
+    q_extra = min(max(float(q_extra), 0.0), 0.5)
+    return min(max(q_base + q_extra - 2 * q_base * q_extra, 0.0), 0.5)
+
+
+def qber_from_eve_afterpulse(base_q: float, eve_enabled: bool, eve_rate: float, afterpulse_prob: float, dark_random_error: float = 0.0):
+    """Estimate observed QBER from optical error, intercept-resend Eve, afterpulse and dark/random error.
+
+    - Intercept-resend contributes about 25% error on the intercepted fraction.
+    - Afterpulse is modeled as extra detector-originated clicks with random bit value.
+    - dark_random_error is a small optional random-error probability added independently.
+    """
+    q = min(max(float(base_q), 0.0), 0.5)
+    eve_component = 0.25 * min(max(float(eve_rate if eve_enabled else 0.0), 0.0), 1.0)
+    q_after_eve = combine_independent_errors(q, eve_component)
+    ap = min(max(float(afterpulse_prob), 0.0), 0.95)
+    ap_ratio = ap / max(1.0 - ap, 1e-12)
+    q_after_ap = (q_after_eve + 0.5 * ap_ratio) / (1.0 + ap_ratio)
+    q_after_dark = combine_independent_errors(q_after_ap, dark_random_error)
+    return min(max(q_after_dark, 0.0), 0.5), {
+        "base_qber[%]": q * 100,
+        "eve追加誤り[%]": eve_component * 100,
+        "after_eve_qber[%]": q_after_eve * 100,
+        "afterpulse_extra_click_ratio[%]": ap_ratio * 100,
+        "after_afterpulse_qber[%]": q_after_ap * 100,
+        "dark_random_error[%]": dark_random_error * 100,
+        "final_qber[%]": q_after_dark * 100,
+    }
 
 def make_paper_counts(protocol: str, n_total: int, qz: float, qx: float, randomize: bool, seed: int):
     rng = np.random.default_rng(seed)
@@ -349,11 +381,11 @@ def make_paper_style_fig(results):
 # ============================================================
 # UI
 # ============================================================
-st.title("T12 2013 論文値再現シミュレータ v8 LP")
-st.caption("Appendix LP推定、ランダム揺らぎ修正、T12/BB84別epsilon最適化対応。係数補正なしでEq.(7)まで通します。")
+st.title("T12 2013 論文値再現シミュレータ v9 Eve")
+st.caption("Appendix LP推定、Eve/アフターパルスからのQBER逆算モード、T12/BB84別epsilon最適化対応。")
 st.markdown("""
-- **論文値確認**：`統計揺らぎ`をOFF、`推定方式=Appendix LP推定`、`epsilon自動配分`をONにしてください。  
-- **インターン実演**：`統計揺らぎ`をONにすると、Poisson/Binomial揺らぎが入ります。大きい送信パルス数では揺らぎは小さいです。  
+- **論文値確認**：`QBERモード=直接指定`、`統計揺らぎ`をOFF、`推定方式=Appendix LP推定`、`epsilon自動配分`をONにしてください。  
+- **インターン実演**：`QBERモード=Eve/アフターパルスから推定`で模擬盗聴器やAPD効果からQBERを逆算できます。`統計揺らぎ`をONにするとPoisson/Binomial揺らぎも入ります。  
 - 1.09/0.63に寄せる処理は、SKRに係数を掛けるのではなく、T12/BB84それぞれで`eps_PE/eps_s` の配分を総ε制約内で探索します。
 """)
 
@@ -367,9 +399,32 @@ with st.sidebar:
     method = st.radio("推定方式", ["Appendix LP推定", "Closed-form推定"], index=0)
     kmax = st.slider("LP Poisson打切り kmax", 8, 30, 20, 1)
 
-    st.header("50 km論文値")
-    qz = st.slider("Z基底 signal QBER [%]", 0.0, 15.0, PAPER_50KM_QBER["Z"] * 100, 0.01) / 100
-    qx = st.slider("X基底 signal QBER [%]", 0.0, 15.0, PAPER_50KM_QBER["X"] * 100, 0.01) / 100
+    st.header("QBER設定 / Eve・実機要因")
+    qber_mode = st.radio("QBERモード", ["直接指定", "Eve/アフターパルスから推定"], index=0)
+    if qber_mode == "直接指定":
+        qz = st.slider("Z基底 signal QBER [%]", 0.0, 20.0, PAPER_50KM_QBER["Z"] * 100, 0.01) / 100
+        qx = st.slider("X基底 signal QBER [%]", 0.0, 20.0, PAPER_50KM_QBER["X"] * 100, 0.01) / 100
+        eve_enabled = False
+        eve_rate = 0.0
+        afterpulse_prob = 0.0
+        dark_random_error = 0.0
+        qber_breakdown = pd.DataFrame([
+            {"basis": "Z", "base_qber[%]": qz * 100, "final_qber[%]": qz * 100},
+            {"basis": "X", "base_qber[%]": qx * 100, "final_qber[%]": qx * 100},
+        ])
+    else:
+        base_qz = st.slider("基礎Z光学QBER [%]", 0.0, 15.0, PAPER_50KM_QBER["Z"] * 100, 0.01) / 100
+        base_qx = st.slider("基礎X光学QBER [%]", 0.0, 15.0, PAPER_50KM_QBER["X"] * 100, 0.01) / 100
+        eve_enabled = st.checkbox("模擬盗聴器 Eve を有効化", value=True)
+        eve_rate = st.slider("Eve介入率 [%]", 0.0, 100.0, 0.0, 1.0, disabled=not eve_enabled) / 100
+        afterpulse_prob = st.slider("APDアフターパルス確率 [%]", 0.0, 20.0, 0.0, 0.05) / 100
+        dark_random_error = st.slider("暗計数などランダム誤り [%]", 0.0, 5.0, 0.0, 0.01) / 100
+        qz, bz = qber_from_eve_afterpulse(base_qz, eve_enabled, eve_rate, afterpulse_prob, dark_random_error)
+        qx, bx = qber_from_eve_afterpulse(base_qx, eve_enabled, eve_rate, afterpulse_prob, dark_random_error)
+        bz["basis"] = "Z"
+        bx["basis"] = "X"
+        qber_breakdown = pd.DataFrame([bz, bx])
+        st.caption(f"推定QBER: Z={qz*100:.3f}% / X={qx*100:.3f}%")
 
     st.header("有限サイズ・EC")
     leak_mode = st.radio("leakEC評価", ["Paper common formula n*fEC*h(Q)", "Shannon limit fEC=1.00"], index=0)
@@ -421,7 +476,15 @@ if st.button("論文式で実行", type="primary"):
 
     if auto_epsilon and opt_msgs:
         st.success("epsilon自動配分: " + " / ".join(opt_msgs))
-    st.caption(f"実行条件: randomize={randomize}, seed={base_seed}, method={method}, protocol-wise epsilon={eps_map}")
+    st.caption(f"実行条件: randomize={randomize}, seed={base_seed}, method={method}, protocol-wise epsilon={eps_map}, qber_mode={qber_mode}")
+    with st.expander("0. QBER推定内訳（Eve/アフターパルス→QBER）", expanded=(qber_mode != "直接指定")):
+        st.dataframe(qber_breakdown, use_container_width=True)
+        if qber_mode != "直接指定":
+            st.markdown("""
+            - intercept-resend型の模擬盗聴は、介入した割合に対して概ね25%の追加誤りとして扱っています。  
+            - アフターパルスは追加クリックがランダムビットを持つ近似として、検出イベントに混ざる形でQBERを上げます。  
+            - ここで求めたZ/X QBERを、そのまま後段の `N/C/E → LP推定 → Eq.(7)` に渡しています。
+            """)
 
     odf = build_overall_df(results)
     bdf = build_basis_df(results)
